@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "Bash(\"/c/Program Files/Go/bin/go\" build ./...)"
     ]
   }
 }

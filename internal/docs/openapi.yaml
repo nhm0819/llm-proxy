@@ -1,0 +1,571 @@
+openapi: "3.0.3"
+info:
+  title: LLM Proxy API
+  description: |
+    OpenAI-compatible LLM API 요청을 여러 업스트림 백엔드로 라우팅하는 리버스 프록시.
+
+    ## 인증
+    모든 `/v1/*` 엔드포인트는 **프록시 API 키**(`sk-proxy-*`)를 Bearer 토큰으로 요구합니다.
+    어드민 엔드포인트(`/admin/keys`)는 `ADMIN_API_KEY` 환경변수로 설정된 어드민 토큰을 요구합니다.
+  version: "1.0.0"
+  contact:
+    name: llm-proxy
+
+servers:
+  - url: http://localhost:8080
+    description: 로컬 개발 서버
+
+tags:
+  - name: proxy
+    description: OpenAI-compatible 프록시 엔드포인트
+  - name: admin
+    description: API 키 어드민 관리
+  - name: ops
+    description: 운영 (헬스체크, 메트릭)
+
+paths:
+  /healthz:
+    get:
+      tags: [ops]
+      summary: 헬스체크
+      operationId: healthz
+      responses:
+        "200":
+          description: 서버 정상 동작 중
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "ok\n"
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus 메트릭
+      operationId: metrics
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/chat/completions:
+    post:
+      tags: [proxy]
+      summary: Chat Completions (OpenAI compatible)
+      operationId: chatCompletions
+      security:
+        - proxyApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+            examples:
+              basic:
+                summary: 기본 요청
+                value:
+                  model: gpt-4o-mini
+                  messages:
+                    - role: user
+                      content: "Hello!"
+              streaming:
+                summary: 스트리밍 요청
+                value:
+                  model: gpt-4o
+                  messages:
+                    - role: user
+                      content: "Tell me a story"
+                  stream: true
+      responses:
+        "200":
+          description: 응답 (스트리밍 시 text/event-stream)
+          headers:
+            X-Token-Limit:
+              description: 일일 토큰 한도
+              schema:
+                type: integer
+            X-Token-Used:
+              description: 현재 사용 토큰 수
+              schema:
+                type: integer
+            X-Token-Remaining:
+              description: 남은 토큰 수
+              schema:
+                type: integer
+            X-Request-ID:
+              description: 요청 추적 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-Sent Events stream
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "402":
+          $ref: "#/components/responses/QuotaExceeded"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /v1/completions:
+    post:
+      tags: [proxy]
+      summary: Completions (OpenAI compatible)
+      operationId: completions
+      security:
+        - proxyApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompletionRequest"
+      responses:
+        "200":
+          description: Completion 응답
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompletionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "402":
+          $ref: "#/components/responses/QuotaExceeded"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /v1/embeddings:
+    post:
+      tags: [proxy]
+      summary: Embeddings (OpenAI compatible)
+      operationId: embeddings
+      security:
+        - proxyApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmbeddingRequest"
+      responses:
+        "200":
+          description: Embedding 벡터 응답
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbeddingResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "402":
+          $ref: "#/components/responses/QuotaExceeded"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /admin/keys:
+    post:
+      tags: [admin]
+      summary: API 키 생성
+      operationId: createKey
+      security:
+        - adminApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyRequest"
+            examples:
+              basic:
+                summary: 기본 키 생성
+                value:
+                  user_id: alice
+                  description: "Alice 서비스용"
+              withExpiry:
+                summary: 만료 시간 지정
+                value:
+                  user_id: bob
+                  description: "임시 액세스"
+                  expires_at: "2026-12-31T00:00:00Z"
+      responses:
+        "201":
+          description: 키 생성 완료
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Key"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AdminDisabled"
+
+    get:
+      tags: [admin]
+      summary: 전체 API 키 목록
+      operationId: listKeys
+      security:
+        - adminApiKey: []
+      responses:
+        "200":
+          description: 키 목록 (만료된 키 자동 제외)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AdminDisabled"
+
+  /admin/keys/{key}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        description: 프록시 API 키 (sk-proxy-...)
+        schema:
+          type: string
+          example: sk-proxy-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6
+
+    get:
+      tags: [admin]
+      summary: 키 메타데이터 조회
+      operationId: getKey
+      security:
+        - adminApiKey: []
+      responses:
+        "200":
+          description: 키 메타데이터
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Key"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AdminDisabled"
+
+    delete:
+      tags: [admin]
+      summary: 키 폐기 (즉시 무효화)
+      operationId: deleteKey
+      security:
+        - adminApiKey: []
+      responses:
+        "204":
+          description: 키 폐기 완료
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AdminDisabled"
+
+components:
+  securitySchemes:
+    proxyApiKey:
+      type: http
+      scheme: bearer
+      description: 프록시 API 키 (sk-proxy-*)
+    adminApiKey:
+      type: http
+      scheme: bearer
+      description: 어드민 API 키 (ADMIN_API_KEY 환경변수)
+
+  schemas:
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          example: gpt-4o-mini
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        stream:
+          type: boolean
+          default: false
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        max_tokens:
+          type: integer
+        top_p:
+          type: number
+
+    Message:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          type: string
+
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: chat.completion
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                $ref: "#/components/schemas/Message"
+              finish_reason:
+                type: string
+        usage:
+          $ref: "#/components/schemas/Usage"
+
+    CompletionRequest:
+      type: object
+      required: [model, prompt]
+      properties:
+        model:
+          type: string
+        prompt:
+          type: string
+        max_tokens:
+          type: integer
+        stream:
+          type: boolean
+
+    CompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              text:
+                type: string
+              finish_reason:
+                type: string
+        usage:
+          $ref: "#/components/schemas/Usage"
+
+    EmbeddingRequest:
+      type: object
+      required: [model, input]
+      properties:
+        model:
+          type: string
+          example: text-embedding-3-small
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+
+    EmbeddingResponse:
+      type: object
+      properties:
+        object:
+          type: string
+          example: list
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              object:
+                type: string
+                example: embedding
+              index:
+                type: integer
+              embedding:
+                type: array
+                items:
+                  type: number
+        model:
+          type: string
+        usage:
+          $ref: "#/components/schemas/Usage"
+
+    Usage:
+      type: object
+      properties:
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+
+    CreateKeyRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          description: 키를 소유할 사용자 ID
+          example: alice
+        description:
+          type: string
+          description: 키 설명 (선택)
+          example: "Alice 서비스용"
+        expires_at:
+          type: string
+          format: date-time
+          description: 만료 시간 RFC3339 (선택)
+          example: "2026-12-31T00:00:00Z"
+
+    Key:
+      type: object
+      properties:
+        key:
+          type: string
+          description: 프록시 API 키
+          example: sk-proxy-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6
+        user_id:
+          type: string
+          example: alice
+        description:
+          type: string
+          example: "Alice 서비스용"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    KeyList:
+      type: object
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/Key"
+        count:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            type:
+              type: string
+            message:
+              type: string
+
+  responses:
+    BadRequest:
+      description: 잘못된 요청
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              type: invalid_request_error
+              message: "user_id is required"
+
+    Unauthorized:
+      description: 인증 실패
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              type: auth_error
+              message: "invalid api key"
+
+    NotFound:
+      description: 리소스 없음
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              type: not_found
+              message: "key not found"
+
+    RateLimited:
+      description: RPS 초과
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              type: rate_limit_error
+              message: "rate limit exceeded"
+
+    QuotaExceeded:
+      description: 일일 토큰 할당량 초과
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              type: quota_error
+              message: "daily token quota exceeded"
+
+    BadGateway:
+      description: 업스트림 오류
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              type: server_error
+              message: "upstream error"
+
+    AdminDisabled:
+      description: 어드민 API 비활성화 (ADMIN_API_KEY 미설정)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              type: admin_disabled
+              message: "admin API is disabled: set ADMIN_API_KEY to enable"

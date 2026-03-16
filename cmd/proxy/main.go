@@ -16,6 +16,7 @@ import (
 	"github.com/nhm0819/llm-proxy/internal/audit"
 	"github.com/nhm0819/llm-proxy/internal/breaker"
 	"github.com/nhm0819/llm-proxy/internal/config"
+	"github.com/nhm0819/llm-proxy/internal/docs"
 	"github.com/nhm0819/llm-proxy/internal/loki"
 	"github.com/nhm0819/llm-proxy/internal/metrics"
 	"github.com/nhm0819/llm-proxy/internal/middleware"
@@ -97,6 +98,9 @@ func main() {
 	// Admin key management (requires ADMIN_API_KEY bearer token)
 	adminHandler := apikey.NewHandler(keyStore, cfg.AdminAPIKey)
 	adminHandler.Register(mux)
+
+	// API docs (Swagger UI + OpenAPI spec)
+	docs.Register(mux)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
