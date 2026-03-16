@@ -35,9 +35,12 @@ Go 실행 파일 경로: `/c/Program\ Files/Go/bin/go` (Windows PATH에 없는 �
 ```
 cmd/proxy/main.go              진입점, 의존성 조립 (DI root)
 internal/
+  apikey/    store.go          Redis 기반 API 키 CRUD + Resolve
+             handler.go        Admin HTTP 핸들러 (/admin/keys)
+             store_test.go     apikey 단위 테스트
   config/    config.go         환경변수 로딩
              validate.go       시작 시 검증
-  router/    router.go         모델명 접두사 → 업스트림 RouteRule (최장 접두사 우선)
+  router/    router.go         모델명 → 업스트림 라우팅 (최장 접두사 우선)
   pii/       pii.go            정규식 + 체크섬 기반 PII 탐지·마스킹
   tokencount/tokencount.go     tiktoken 토큰 카운터 (캐시 포함)
   quota/     quota.go          Redis Lua: 원자적 예약(reserve) + 정산(adjust)
@@ -48,7 +51,7 @@ internal/
   metrics/   metrics.go        Prometheus Counter / Histogram / Gauge 등록
   middleware/
     middleware.go              Recover · RequestID · AccessLog · MaxBody
-    auth.go                    프록시 API 키 인증 → X-User-ID 주입
+    auth.go                    KeyResolver 인터페이스 + AuthAPIKey 미들웨어
   proxy/
     proxy.go                   핵심 ServeHTTP 핸들러
     classifier.go              경로/필드 분류·추출 헬퍼
@@ -65,7 +68,7 @@ pkg/
 2. `RequestID` → X-Request-ID 생성/전파
 3. `Recover` → 패닉 복구
 4. `AccessLog` → 요청 로깅
-5. `AuthAPIKey` → 프록시 키 검증, X-User-ID 주입, Authorization 헤더 삭제
+5. `AuthAPIKey(keyStore)` → Redis에서 키 조회, X-User-ID 주입, Authorization 헤더 삭제
 6. `proxy.ServeHTTP`
    - 본문 파싱 (JSON)
    - RPS 제한 확인 (Redis Lua)
@@ -79,6 +82,64 @@ pkg/
 
 ---
 
+## API 키 관리
+
+### Redis 저장 구조
+| 키 패턴 | 타입 | 내용 |
+|---------|------|------|
+| `apikey:<key>` | Hash | user_id, description, created_at, expires_at (선택) |
+| `apikeys:index` | Set | 전체 키 목록 (TTL 만료 항목은 List 시 자동 정리) |
+
+### 시작 시 시드 (마이그레이션)
+`PROXY_API_KEYS_JSON`에 정의된 키를 시작 시 Redis에 자동으로 시드합니다.
+이미 존재하는 키는 덮어쓰지 않습니다 (멱등성).
+
+### KeyResolver 인터페이스
+```go
+// middleware.KeyResolver
+type KeyResolver interface {
+    Resolve(ctx context.Context, key string) (userID string, found bool, err error)
+}
+```
+`apikey.Store`가 구현합니다. 테스트에서는 `middleware.StaticKeyRegistry`를 직접 사용하세요.
+
+### Admin REST API (`/admin/keys`)
+`ADMIN_API_KEY` 환경변수를 Bearer 토큰으로 인증합니다. 미설정 시 503 반환.
+
+```bash
+# 키 생성
+curl -X POST http://localhost:8080/admin/keys \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "alice", "description": "Alice 서비스용"}'
+# → {"key":"sk-proxy-...","user_id":"alice","created_at":"..."}
+
+# 만료 시간 지정 (RFC3339)
+  -d '{"user_id": "bob", "expires_at": "2026-12-31T00:00:00Z"}'
+
+# 전체 키 목록
+curl http://localhost:8080/admin/keys \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
+# → {"keys":[...],"count":N}
+
+# 특정 키 조회
+curl http://localhost:8080/admin/keys/sk-proxy-xxx \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
+
+# 키 폐기 (204 No Content)
+curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
+```
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `POST` | `/admin/keys` | 새 키 생성 |
+| `GET` | `/admin/keys` | 전체 키 목록 |
+| `GET` | `/admin/keys/{key}` | 키 메타데이터 조회 |
+| `DELETE` | `/admin/keys/{key}` | 키 폐기 |
+
+---
+
 ## 핵심 설계 원칙
 
 ### Redis Lua 스크립트
@@ -88,13 +149,13 @@ pkg/
 비스트리밍: 토큰 계산 → Adjust → `setQuotaHeaders` → `WriteHeader` → `Write` 순서를 반드시 유지. `WriteHeader` 이후 헤더 설정 불가.
 
 ### SSE 스트리밍
-`middleware.responseWriter`는 `http.Flusher`를 위임 구현해야 함. 미구현 시 SSE 청크가 클라이언트에 즉시 전달되지 않음.
+`middleware.responseWriter`는 `http.Flusher`를 위임 구현. 미구현 시 SSE 청크가 클라이언트에 즉시 전달되지 않음.
 
 ### 회로 차단기
 `breaker.Breaker`는 `http.RoundTripper`로 구현되어 `HTTPClient.Transport`에 삽입. 업스트림 호스트별로 독립 circuit 유지.
 
 ### 인증
-`PROXY_API_KEYS_JSON`이 빈 값이면 인증 스킵 (개발 모드). 프로덕션에서는 반드시 설정. 업스트림 API 키는 라우트 설정에만 존재하며 클라이언트에 노출되지 않음.
+`AuthAPIKey`는 `KeyResolver` 인터페이스를 받습니다 — 프로덕션에서는 `apikey.Store` (Redis), 테스트에서는 `StaticKeyRegistry`. 시작 시 `PROXY_API_KEYS_JSON`을 Redis에 시드 후 Redis가 단일 소스.
 
 ---
 
@@ -102,12 +163,13 @@ pkg/
 
 | 패키지 | 테스트 방식 |
 |--------|------------|
+| `apikey` | miniredis + redis 클라이언트; `mr.FastForward`로 TTL 만료 시뮬레이션 |
 | `audit` | miniredis + redis 클라이언트(`rdb.XRange`, `rdb.HGetAll`)로 검증 — miniredis 직접 메서드 사용 금지 |
 | `quota`, `ratelimit` | miniredis + redis 클라이언트 |
-| `proxy` (통합) | `httptest.Server` fake upstream + miniredis |
+| `proxy` (통합) | `httptest.Server` fake upstream + miniredis; `StaticKeyRegistry` 사용 |
 | `breaker`, `pii`, `router` | 순수 단위 테스트 |
 
-**중요**: miniredis v2.33.0은 `XRange`, `HGetAll` 직접 메서드가 없고 `TTL`은 `time.Duration` 단일 반환. redis 클라이언트를 통해 검증할 것.
+**중요**: miniredis v2.33.0은 `XRange`, `HGetAll` 직접 메서드 없음. `TTL`은 `time.Duration` 단일 반환.
 
 ---
 
@@ -118,7 +180,8 @@ pkg/
 | `UPSTREAM_BASE_URL` | `https://api.openai.com` | 기본 업스트림 |
 | `UPSTREAM_API_KEY` | — | 업스트림 API 키 |
 | `ROUTES_JSON` | — | 멀티 업스트림 라우팅 규칙 (JSON 배열) |
-| `PROXY_API_KEYS_JSON` | — | 프록시 키 → userID 맵 (빈값=인증없음) |
+| `PROXY_API_KEYS_JSON` | — | 시작 시 Redis에 시드할 정적 키 맵 |
+| `ADMIN_API_KEY` | — | Admin API Bearer 토큰 (미설정 시 비활성) |
 | `REDIS_ADDR` | `localhost:6379` | Redis 주소 |
 | `TOKEN_DAILY_LIMIT` | `200000` | 사용자별 일일 토큰 한도 |
 | `TOKEN_SAFETY_FACTOR` | `1.20` | 토큰 예약 안전 계수 (≥ 1.0) |
@@ -136,7 +199,7 @@ pkg/
 
 | 서비스 | 포트 |
 |--------|------|
-| llm-proxy | `8080` (`/healthz`, `/metrics` 포함) |
+| llm-proxy | `8080` (`/healthz`, `/metrics`, `/admin/keys` 포함) |
 | Redis | `6379` |
 | Loki | `3100` |
 | Grafana | `3000` (admin/admin) |

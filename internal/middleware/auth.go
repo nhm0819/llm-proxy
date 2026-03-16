@@ -3,19 +3,19 @@
 // The proxy issues its own API keys that map to user IDs.
 // This prevents anonymous access and ties every request to a quota subject.
 //
-// Key format:  sk-proxy-<hex32>
-// Storage:     environment variable PROXY_API_KEYS_JSON
-//              e.g. {"sk-proxy-abc123": "alice", "sk-proxy-def456": "bob"}
+// Key format:  sk-proxy-<hex48>
+// Storage:     Redis (primary) seeded from PROXY_API_KEYS_JSON on startup
 //
 // Per-request flow:
-//   1. Extract "Bearer <key>" from Authorization header.
-//   2. Look up key in the registry.
-//   3. Inject the resolved userID into X-User-ID header for downstream handlers.
-//   4. Strip the proxy key from Authorization so it is never forwarded upstream.
+//  1. Extract "Bearer <key>" from Authorization header.
+//  2. Resolve the key via the KeyResolver (Redis store).
+//  3. Inject the resolved userID into X-User-ID header for downstream handlers.
+//  4. Strip the proxy key from Authorization so it is never forwarded upstream.
 
 package middleware
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -27,38 +27,58 @@ import (
 
 const headerUserID = "X-User-ID"
 
-// APIKeyRegistry maps proxy API keys to user IDs.
-type APIKeyRegistry map[string]string
+// KeyResolver resolves a proxy API key to a userID.
+// Implementations: apikey.Store (Redis-backed), StaticKeyRegistry (env-var fallback).
+type KeyResolver interface {
+	Resolve(ctx context.Context, key string) (userID string, found bool, err error)
+}
 
-// LoadAPIKeyRegistry reads PROXY_API_KEYS_JSON from the environment.
-// Returns an empty registry (open access) if the variable is not set, which is
+// StaticKeyRegistry is a simple in-memory map, used as a fallback when the
+// Redis-backed store is unavailable, and for tests.
+type StaticKeyRegistry map[string]string
+
+// Resolve implements KeyResolver for StaticKeyRegistry.
+func (r StaticKeyRegistry) Resolve(_ context.Context, key string) (string, bool, error) {
+	userID, ok := r[key]
+	return userID, ok, nil
+}
+
+// LoadStaticKeyRegistry reads PROXY_API_KEYS_JSON from the environment.
+// Returns an empty registry (open access) if the variable is not set —
 // safe only in development.
-func LoadAPIKeyRegistry() APIKeyRegistry {
+func LoadStaticKeyRegistry() StaticKeyRegistry {
 	s := os.Getenv("PROXY_API_KEYS_JSON")
 	if s == "" {
 		log.Println("warn: PROXY_API_KEYS_JSON not set – proxy is unauthenticated")
-		return APIKeyRegistry{}
+		return StaticKeyRegistry{}
 	}
-	var reg APIKeyRegistry
+	var reg StaticKeyRegistry
 	if err := json.Unmarshal([]byte(s), &reg); err != nil {
 		log.Fatalf("PROXY_API_KEYS_JSON parse error: %v", err)
 	}
-	log.Printf("loaded %d proxy API keys", len(reg))
+	log.Printf("loaded %d proxy API keys (static)", len(reg))
 	return reg
 }
 
-// AuthAPIKey returns middleware that validates the Bearer token in the
-// Authorization header against reg.
+// APIKeyRegistry is kept for backward compatibility with existing tests.
+type APIKeyRegistry = StaticKeyRegistry
+
+// LoadAPIKeyRegistry is an alias for LoadStaticKeyRegistry.
+// Deprecated: use LoadStaticKeyRegistry.
+func LoadAPIKeyRegistry() APIKeyRegistry { return LoadStaticKeyRegistry() }
+
+// AuthAPIKey returns middleware that validates the Bearer token via resolver.
 //
-//   - If reg is empty the middleware is a no-op (development mode).
+//   - If resolver is nil or a StaticKeyRegistry with no entries, the middleware
+//     is a no-op (development mode).
 //   - On success the resolved userID is written to X-User-ID and the
-//     Authorization header is stripped so the upstream API key (injected by
-//     the router) is set cleanly in proxy.go.
-func AuthAPIKey(reg APIKeyRegistry) func(http.Handler) http.Handler {
+//     Authorization header is stripped so the upstream API key (set by the
+//     router) is injected cleanly in proxy.go.
+func AuthAPIKey(resolver KeyResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// No-op when registry is empty (dev mode)
-			if len(reg) == 0 {
+			// No-op when resolver is an empty static registry (dev mode).
+			if reg, ok := resolver.(StaticKeyRegistry); ok && len(reg) == 0 {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -70,8 +90,13 @@ func AuthAPIKey(reg APIKeyRegistry) func(http.Handler) http.Handler {
 				return
 			}
 
-			userID, ok := reg[key]
-			if !ok {
+			userID, found, err := resolver.Resolve(r.Context(), key)
+			if err != nil {
+				httputil.RespondErr(w, http.StatusBadGateway,
+					"server_error", "auth backend error")
+				return
+			}
+			if !found {
 				httputil.RespondErr(w, http.StatusUnauthorized,
 					"auth_error", "invalid api key")
 				return

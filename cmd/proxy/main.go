@@ -12,6 +12,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/nhm0819/llm-proxy/internal/apikey"
 	"github.com/nhm0819/llm-proxy/internal/audit"
 	"github.com/nhm0819/llm-proxy/internal/breaker"
 	"github.com/nhm0819/llm-proxy/internal/config"
@@ -34,6 +35,19 @@ func main() {
 
 	rdb := mustRedis(cfg)
 
+	// ── API key store (Redis-backed) ─────────────────────────────────────────
+	keyStore := apikey.New(rdb)
+
+	// Seed static keys from PROXY_API_KEYS_JSON into Redis (one-time migration).
+	staticKeys := middleware.LoadStaticKeyRegistry()
+	if len(staticKeys) > 0 {
+		seedCtx, seedCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer seedCancel()
+		if err := keyStore.SeedFromMap(seedCtx, staticKeys); err != nil {
+			log.Printf("warn: failed to seed static API keys into Redis: %v", err)
+		}
+	}
+
 	m := metrics.New()
 
 	cbTransport := breaker.New(http.DefaultTransport, breaker.BreakerConfig{
@@ -44,8 +58,6 @@ func main() {
 		Timeout:   cfg.UpstreamTimeout,
 		Transport: cbTransport,
 	}
-
-	apiKeyReg := middleware.LoadAPIKeyRegistry()
 
 	deps := proxy.Dependencies{
 		Router:     router.New(cfg),
@@ -67,16 +79,24 @@ func main() {
 	proxyHandler := proxy.New(cfg, deps)
 
 	mux := http.NewServeMux()
+
+	// Proxy routes
 	mux.Handle("/v1/", middleware.Chain(
 		proxyHandler,
-		middleware.AuthAPIKey(apiKeyReg),
+		middleware.AuthAPIKey(keyStore),
 		middleware.Recover,
 		middleware.RequestID,
 		middleware.AccessLog,
 		middleware.MaxBody(config.DefaultMaxBodyBytes),
 	))
+
+	// Health + metrics (unauthenticated)
 	mux.HandleFunc("/healthz", healthz)
 	mux.Handle("/metrics", metrics.Handler())
+
+	// Admin key management (requires ADMIN_API_KEY bearer token)
+	adminHandler := apikey.NewHandler(keyStore, cfg.AdminAPIKey)
+	adminHandler.Register(mux)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
@@ -88,6 +108,11 @@ func main() {
 
 	go func() {
 		log.Printf("llm-proxy listening on %s", cfg.ListenAddr)
+		if cfg.AdminAPIKey != "" {
+			log.Printf("admin API enabled on /admin/keys")
+		} else {
+			log.Printf("admin API disabled (set ADMIN_API_KEY to enable)")
+		}
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server error: %v", err)
 		}

@@ -63,6 +63,9 @@ type Config struct {
 	AuditStoreRecord      bool
 	AuditHMACKey          string // if set, HMAC-SHA256; else plain SHA-256
 
+	// Admin API
+	AdminAPIKey string // Bearer token for /admin/* endpoints; empty = disabled
+
 	// Proxy behaviour
 	UpstreamTimeout time.Duration
 
@@ -97,7 +100,9 @@ func Load() Config {
 		AuditStreamKey:        envStr("audit:llm-proxy", "AUDIT_STREAM_KEY"),
 		AuditRecordTTLSeconds: envInt(7*24*3600, "AUDIT_RECORD_TTL_SECONDS"),
 		AuditStoreRecord:      envBool(true, "AUDIT_STORE_REQUEST_RECORD"),
-		AuditHMACKey:          os.Getenv("AUDIT_HMAC_KEY"),
+		AuditHMACKey: os.Getenv("AUDIT_HMAC_KEY"),
+
+		AdminAPIKey: os.Getenv("ADMIN_API_KEY"),
 
 		UpstreamTimeout: time.Duration(envInt(DefaultUpstreamTimeoutSec, "UPSTREAM_TIMEOUT_SECONDS")) * time.Second,
 
