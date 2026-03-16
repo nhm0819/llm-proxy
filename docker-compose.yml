@@ -1,0 +1,80 @@
+version: "3.9"
+
+services:
+  proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Routing – default to OpenAI; override with ROUTES_JSON for multi-backend
+      UPSTREAM_BASE_URL: "https://api.openai.com"
+      UPSTREAM_API_KEY: "${OPENAI_API_KEY}"
+
+      # Auth – map proxy keys to user IDs
+      # Example: PROXY_API_KEYS_JSON: '{"sk-proxy-dev":"dev-user"}'
+      PROXY_API_KEYS_JSON: ""    # empty = no auth (dev mode)
+
+      # Redis
+      REDIS_ADDR: "redis:6379"
+
+      # Quota
+      TOKEN_DAILY_LIMIT: "200000"
+      TOKEN_SAFETY_FACTOR: "1.20"
+      QUOTA_TIMEZONE: "Asia/Seoul"
+
+      # Rate limit
+      RATE_LIMIT_RPS: "5"
+
+      # PII
+      PII_BLOCK: "false"
+
+      # Observability
+      LOKI_PUSH_URL: "http://loki:3100/loki/api/v1/push"
+      LOKI_LABELS: "app=llm-proxy,env=dev"
+
+      # Audit
+      AUDIT_STREAM_KEY: "audit:llm-proxy"
+      AUDIT_RECORD_TTL_SECONDS: "604800"  # 7 days
+      AUDIT_STORE_REQUEST_RECORD: "true"
+      # AUDIT_HMAC_KEY: "change-me-in-production"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Optional: Grafana + Loki for log visualisation
+  loki:
+    image: grafana/loki:2.9.4
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - loki
+      - proxy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  grafana_data:
