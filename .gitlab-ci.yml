@@ -8,6 +8,7 @@
 
 stages:
   - test
+  - review       # LLM 코드 리뷰 (MR 전용)
   - build
   - deploy
 
@@ -87,6 +88,41 @@ build-check:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ─────────────────────────────────────────────────────────────
+# STAGE: review  (MR 이벤트에서만 — vLLM 코드 리뷰)
+# ─────────────────────────────────────────────────────────────
+#
+# 필요 CI/CD Variables (GitLab Settings > CI/CD > Variables):
+#   LLM_API_BASE_URL  : vLLM 또는 프록시 엔드포인트
+#   LLM_API_KEY       : 프록시 API 키 (sk-proxy-*)
+#   LLM_MODEL         : 사용 모델 (예: qwen2.5-coder-32b-instruct)
+#   GITLAB_TOKEN      : MR 코멘트 권한이 있는 GitLab Personal/Project 토큰
+#   LLM_REVIEW_LANG   : ko (기본) 또는 en
+
+llm-review:
+  stage: review
+  image: python:3.12-slim
+  variables:
+    GIT_DEPTH: 0              # 전체 히스토리 필요 (diff base SHA 계산)
+    # ── 아래 변수는 GitLab CI/CD Variables에 등록 ──────────────
+    # LLM_API_BASE_URL: "http://vllm.internal:8000"
+    # LLM_API_KEY: "sk-proxy-xxxx"
+    # LLM_MODEL: "Qwen3.5-122B-A10B"
+    # GITLAB_TOKEN: "<project-token>"
+    # ── 모델 특성에 맞춰 조정된 기본값 ────────────────────────
+    LLM_REVIEW_LANG: "ko"
+    LLM_MAX_DIFF_LINES: "15000"   # 262K ctx → ~240K diff 가용 ≈ 15,000줄
+    LLM_THINKING: "true"          # Qwen3 thinking mode 활성화
+    LLM_THINKING_BUDGET: "8192"   # thinking 최대 토큰 (-1=무제한)
+  script:
+    - python scripts/llm_review.py
+  rules:
+    # MR 이벤트에서만 실행
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+  allow_failure: true       # LLM 장애 시 파이프라인 블로킹 방지
+  timeout: 15 minutes       # thinking 추론 포함 여유 시간
 
 # ─────────────────────────────────────────────────────────────
 # STAGE: build  (태그가 달린 경우에만 Docker 이미지 빌드)
