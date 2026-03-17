@@ -3,20 +3,6 @@
 LLM Code Review — GitLab CI 전용 스크립트
 모델: Qwen3.5-122B-A10B (262,144 token native context, thinking mode 지원)
 
-동작 방식:
-  1. git diff로 변경 코드 추출 (*.go 전체, 테스트 포함)
-  2. vLLM (OpenAI-compatible) API에 코드 리뷰 요청
-     - thinking mode 활성화 시 reasoning_content도 수집
-  3. GitLab MR에 코멘트로 결과 등록
-     - thinking 내용은 <details> 접기 블록으로 표시
-
-컨텍스트 예산 (native 262,144 tokens 기준):
-  시스템 프롬프트    :   ~700 tokens
-  응답 (max_tokens) :  8,192 tokens
-  thinking budget   :  8,192 tokens (선택)
-  안전 버퍼         :  5,000 tokens
-  diff 가용          : ~240,000 tokens ≈ 15,000줄 (평균 16 tokens/줄 기준)
-
 필요 환경변수:
   필수:
     LLM_API_BASE_URL     vLLM 엔드포인트 (예: http://vllm.internal:8000)
@@ -28,20 +14,25 @@ LLM Code Review — GitLab CI 전용 스크립트
 
   선택:
     LLM_MAX_DIFF_LINES   diff 최대 라인 수 (기본: 15000)
+    LLM_CONTEXT_LINES    git diff -U 값 (기본: 15)
     LLM_REVIEW_LANG      리뷰 언어 ko|en (기본: ko)
-    LLM_THINKING         thinking mode 활성화 true|false (기본: true)
+    LLM_THINKING         thinking mode true|false (기본: true)
     LLM_THINKING_BUDGET  thinking 최대 토큰 (기본: 8192, -1=무제한)
     CI_SERVER_URL        GitLab 서버 URL (기본: https://gitlab.com)
     GITLAB_API_V4_URL    GitLab API URL (CI 자동 제공)
 """
 
+from __future__ import annotations
+
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 
 
 # ── 설정 ──────────────────────────────────────────────────────
@@ -57,9 +48,27 @@ GL_API_URL       = os.environ.get(
     os.environ.get("CI_SERVER_URL", "https://gitlab.com").rstrip("/") + "/api/v4",
 )
 MAX_LINES        = int(os.environ.get("LLM_MAX_DIFF_LINES", "15000"))
+CONTEXT_LINES    = int(os.environ.get("LLM_CONTEXT_LINES", "15"))
 LANG             = os.environ.get("LLM_REVIEW_LANG", "ko")
 THINKING_ENABLED = os.environ.get("LLM_THINKING", "true").lower() == "true"
-THINKING_BUDGET  = int(os.environ.get("LLM_THINKING_BUDGET", "8192"))  # -1 = unlimited
+THINKING_BUDGET  = int(os.environ.get("LLM_THINKING_BUDGET", "8192"))
+
+# ── diff 필터링 설정 ───────────────────────────────────────────
+
+# git pathspec — 리뷰 대상에서 제외할 파일
+EXCLUDE_PATHSPECS = [
+    ":!vendor/**",           # Go vendor 디렉터리
+    ":!**/*.pb.go",          # protobuf 생성 코드
+    ":!**/*_grpc.pb.go",     # gRPC 생성 코드
+    ":!**/mock_*.go",        # mockery / gomock 생성 모의 객체
+    ":!**/*_mock.go",
+    ":!**/*_gen.go",         # go generate 생성 코드
+    ":!**/zz_generated*.go", # controller-gen 생성 코드
+    ":!**/*.generated.go",
+]
+
+# 파일이 trivial(주석·공백·import만 변경)로 간주되는 최소 실질 추가 라인 수
+TRIVIAL_THRESHOLD = 3
 
 
 # ── 시스템 프롬프트 ────────────────────────────────────────────
@@ -67,7 +76,7 @@ THINKING_BUDGET  = int(os.environ.get("LLM_THINKING_BUDGET", "8192"))  # -1 = un
 SYSTEM_PROMPT_KO = textwrap.dedent("""\
     당신은 Go 언어 전문 시니어 소프트웨어 엔지니어입니다.
     아래 git diff를 빠짐없이 분석해서 코드 리뷰를 작성하세요.
-    변경된 모든 파일(프로덕션 코드 + 테스트)을 함께 검토합니다.
+    각 파일 diff에는 변경 전후 15줄의 컨텍스트가 포함되어 있습니다.
 
     리뷰 항목 (발견된 항목만 포함):
     - 🐛 **버그 / 로직 오류**: 잠재적 패닉, nil 역참조, 경쟁 조건, 엣지 케이스 미처리
@@ -81,14 +90,14 @@ SYSTEM_PROMPT_KO = textwrap.dedent("""\
     - 각 이슈마다 `파일명:라인번호` 명시
     - 구체적인 개선 코드 스니펫 제안 (있을 경우)
     - 심각도: 🔴 Critical / 🟡 Warning / 🔵 Info
-    - 마지막에 **한 줄 요약** (전체 이슈 수, 최고 심각도 포함)
+    - 마지막에 **한 줄 요약** (전체 이슈 수, 최고 심각도)
 
     이슈가 없으면 "✅ 특이사항 없음" 만 출력하세요.
 """)
 
 SYSTEM_PROMPT_EN = textwrap.dedent("""\
     You are a senior Go software engineer performing a thorough code review.
-    Analyze the complete git diff below, covering both production code and tests.
+    The diff includes 15 lines of context around each change for better comprehension.
 
     Review categories (include only what you find):
     - 🐛 **Bugs / Logic errors**: Potential panics, nil dereference, race conditions, unhandled edge cases
@@ -110,6 +119,140 @@ SYSTEM_PROMPT_EN = textwrap.dedent("""\
 SYSTEM_PROMPT = SYSTEM_PROMPT_KO if LANG == "ko" else SYSTEM_PROMPT_EN
 
 
+# ── diff 파싱 & 스마트 필터링 ─────────────────────────────────
+
+@dataclass
+class FileDiff:
+    path: str
+    header: str           # diff --git ... 헤더
+    content: str          # 실제 diff 내용
+    added: int = 0        # '+' 로 시작하는 실질 추가 라인 수
+    removed: int = 0      # '-' 로 시작하는 실질 삭제 라인 수
+    trivial: bool = False # 주석·공백·import만 변경된 경우
+    lines: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.lines = len((self.header + self.content).splitlines())
+
+
+_DIFF_FILE_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
+_TRIVIAL_LINE_RE = re.compile(r"^[+-]\s*(//|import\b|\s*$)")
+
+
+def parse_file_diffs(raw: str) -> list[FileDiff]:
+    """unified diff를 파일별 FileDiff 리스트로 파싱합니다."""
+    segments: list[tuple[int, int]] = []
+    for m in _DIFF_FILE_RE.finditer(raw):
+        segments.append((m.start(), m.end()))
+
+    file_diffs: list[FileDiff] = []
+    for i, (start, _) in enumerate(segments):
+        end = segments[i + 1][0] if i + 1 < len(segments) else len(raw)
+        block = raw[start:end]
+
+        # 헤더(diff/index/---/+++) 와 본문 분리
+        lines = block.splitlines(keepends=True)
+        header_lines, body_lines = [], []
+        in_header = True
+        for line in lines:
+            if in_header and (line.startswith("@@") or (not line.startswith(("diff ", "index ", "--- ", "+++ ", "new ", "deleted ", "old ")))):
+                in_header = False
+            (header_lines if in_header else body_lines).append(line)
+
+        header = "".join(header_lines)
+        content = "".join(body_lines)
+        body_text = content
+
+        # 추가/삭제 라인 계산 (파일 메타 헤더 제외)
+        added = sum(
+            1 for l in body_text.splitlines()
+            if l.startswith("+") and not l.startswith("+++")
+        )
+        removed = sum(
+            1 for l in body_text.splitlines()
+            if l.startswith("-") and not l.startswith("---")
+        )
+
+        # trivial 판정: 실질 추가 라인이 모두 주석/공백/import이면 trivial
+        substantive_adds = [
+            l for l in body_text.splitlines()
+            if l.startswith("+") and not l.startswith("+++")
+            and not _TRIVIAL_LINE_RE.match(l)
+        ]
+        trivial = len(substantive_adds) < TRIVIAL_THRESHOLD
+
+        # path 추출
+        m = _DIFF_FILE_RE.match(block)
+        path = m.group(2) if m else "unknown"
+
+        file_diffs.append(FileDiff(
+            path=path,
+            header=header,
+            content=content,
+            added=added,
+            removed=removed,
+            trivial=trivial,
+        ))
+
+    return file_diffs
+
+
+def prioritize(file_diffs: list[FileDiff]) -> list[FileDiff]:
+    """
+    우선순위 정렬:
+      1. non-trivial 파일 → 추가 라인 수 내림차순
+      2. trivial 파일 → 추가 라인 수 내림차순
+    """
+    non_trivial = sorted(
+        [f for f in file_diffs if not f.trivial],
+        key=lambda f: f.added, reverse=True,
+    )
+    trivial = sorted(
+        [f for f in file_diffs if f.trivial],
+        key=lambda f: f.added, reverse=True,
+    )
+    return non_trivial + trivial
+
+
+def budget_fill(
+    ordered: list[FileDiff],
+    max_lines: int,
+) -> tuple[list[FileDiff], list[FileDiff]]:
+    """
+    파일 단위로 예산을 채웁니다.
+    파일 중간에서 잘리지 않도록 파일 전체가 들어가는 경우만 포함.
+    예산이 남았지만 남은 파일이 너무 크면 건너뜁니다.
+    """
+    included: list[FileDiff] = []
+    skipped: list[FileDiff] = []
+    remaining = max_lines
+
+    for fd in ordered:
+        if fd.lines <= remaining:
+            included.append(fd)
+            remaining -= fd.lines
+        else:
+            skipped.append(fd)
+
+    return included, skipped
+
+
+def build_diff_summary(
+    all_files: list[FileDiff],
+    skipped: list[FileDiff],
+) -> str:
+    """모든 변경 파일의 요약 테이블을 생성합니다."""
+    lines = ["### 변경 파일 요약\n",
+             "| 파일 | +추가 | -삭제 | 분류 | 분석 |",
+             "|------|------:|------:|------|------|"]
+    skipped_paths = {f.path for f in skipped}
+    for fd in all_files:
+        kind = "💬 trivial" if fd.trivial else "📝 코드"
+        analyzed = "⏭ 건너뜀 (예산 초과)" if fd.path in skipped_paths else "✅"
+        lines.append(f"| `{fd.path}` | +{fd.added} | -{fd.removed} | {kind} | {analyzed} |")
+    return "\n".join(lines)
+
+
 # ── 유틸 ──────────────────────────────────────────────────────
 
 def check_env() -> None:
@@ -122,14 +265,26 @@ def check_env() -> None:
 
 
 def get_diff() -> str:
-    """MR base → HEAD diff를 추출합니다. Go 파일 전체 포함 (테스트 파일 포함)."""
+    """
+    MR base → HEAD diff를 추출합니다.
+
+    필터링 전략:
+    - Go 파일만 포함 (*.go)
+    - 생성 코드·vendor 제외 (EXCLUDE_PATHSPECS)
+    - -U{CONTEXT_LINES}: 변경 전후 충분한 컨텍스트 포함
+    """
     base_sha = os.environ.get("CI_MERGE_REQUEST_DIFF_BASE_SHA", "")
     head_sha = os.environ.get("CI_COMMIT_SHA", "HEAD")
 
-    if base_sha:
-        cmd = ["git", "diff", base_sha, head_sha, "--", "*.go"]
-    else:
-        cmd = ["git", "diff", "HEAD~1", "HEAD", "--", "*.go"]
+    base = base_sha if base_sha else "HEAD~1"
+    cmd = [
+        "git", "diff",
+        f"-U{CONTEXT_LINES}",   # 변경 전후 N줄 컨텍스트
+        base, head_sha,
+        "--",
+        "*.go",
+        *EXCLUDE_PATHSPECS,
+    ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -139,13 +294,7 @@ def get_diff() -> str:
     return result.stdout
 
 
-def truncate_diff(diff: str, max_lines: int) -> tuple[str, bool]:
-    lines = diff.splitlines()
-    if len(lines) <= max_lines:
-        return diff, False
-    truncated = "\n".join(lines[:max_lines])
-    return truncated, True
-
+# ── LLM 호출 ──────────────────────────────────────────────────
 
 def call_llm(diff: str) -> tuple[str, str | None]:
     """
@@ -162,11 +311,9 @@ def call_llm(diff: str) -> tuple[str, str | None]:
         "max_tokens": 8192,
     }
 
-    # Qwen3 thinking mode — vLLM은 chat_template_kwargs로 활성화
     if THINKING_ENABLED:
         payload["chat_template_kwargs"] = {"enable_thinking": True}
         if THINKING_BUDGET != -1:
-            # vLLM >= 0.8: thinking_budget 지원
             payload["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
 
     data = json.dumps(payload).encode()
@@ -184,9 +331,7 @@ def call_llm(diff: str) -> tuple[str, str | None]:
             body = json.loads(resp.read())
             msg = body["choices"][0]["message"]
             content = msg.get("content", "").strip()
-            reasoning = msg.get("reasoning_content", None)
-            if reasoning:
-                reasoning = reasoning.strip()
+            reasoning = (msg.get("reasoning_content") or "").strip() or None
             return content, reasoning
     except urllib.error.HTTPError as e:
         err_body = e.read().decode(errors="replace")
@@ -197,25 +342,20 @@ def call_llm(diff: str) -> tuple[str, str | None]:
         sys.exit(1)
 
 
+# ── GitLab 코멘트 ──────────────────────────────────────────────
+
 def post_mr_comment(body: str) -> None:
-    """GitLab MR에 코멘트를 등록합니다."""
     url = f"{GL_API_URL}/projects/{PROJECT_ID}/merge_requests/{MR_IID}/notes"
     payload = json.dumps({"body": body}).encode()
     req = urllib.request.Request(
         url=url,
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "PRIVATE-TOKEN": GL_TOKEN,
-        },
+        headers={"Content-Type": "application/json", "PRIVATE-TOKEN": GL_TOKEN},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status == 201:
-                print("[llm-review] MR 코멘트 등록 완료")
-            else:
-                print(f"[llm-review] 코멘트 등록 상태: {resp.status}")
+            print(f"[llm-review] MR 코멘트 등록 완료 (status={resp.status})")
     except urllib.error.HTTPError as e:
         err_body = e.read().decode(errors="replace")
         print(f"[llm-review] GitLab API 오류 {e.code}: {err_body}", file=sys.stderr)
@@ -225,21 +365,23 @@ def post_mr_comment(body: str) -> None:
 def build_comment(
     review: str,
     reasoning: str | None,
-    truncated: bool,
-    diff_lines: int,
+    summary: str,
+    total_lines: int,
+    analyzed_lines: int,
+    skipped_count: int,
 ) -> str:
     thinking_info = " · thinking ✅" if THINKING_ENABLED else ""
+    coverage = f"{analyzed_lines:,} / {total_lines:,}줄 분석"
+    if skipped_count:
+        coverage += f" ({skipped_count}개 파일 예산 초과로 건너뜀)"
+
     meta = (
         f"> **모델**: `{MODEL}`{thinking_info} | "
-        f"**분석 라인**: {diff_lines:,}"
+        f"**컨텍스트**: ±{CONTEXT_LINES}줄 | {coverage}\n\n"
     )
-    if truncated:
-        meta += f" (상위 {MAX_LINES:,}줄까지 분석)"
-    meta += "\n\n---\n\n"
 
-    body = "## 🤖 LLM 코드 리뷰\n\n" + meta + review
+    body = "## 🤖 LLM 코드 리뷰\n\n" + meta + summary + "\n\n---\n\n" + review
 
-    # thinking 내용은 접기 블록으로 추가 (너무 길어서 기본 접힘)
     if reasoning:
         body += (
             "\n\n<details>\n<summary>🧠 Thinking (추론 과정 펼치기)</summary>\n\n"
@@ -260,17 +402,45 @@ def main() -> None:
         print("[llm-review] Go 파일 변경 없음, 스킵")
         return
 
-    diff, truncated = truncate_diff(raw_diff, MAX_LINES)
-    diff_lines = len(raw_diff.splitlines())
+    print("[llm-review] diff 파싱 및 우선순위 정렬 중...")
+    file_diffs = parse_file_diffs(raw_diff)
+    ordered    = prioritize(file_diffs)
+    included, skipped = budget_fill(ordered, MAX_LINES)
+
+    total_lines    = sum(f.lines for f in file_diffs)
+    analyzed_lines = sum(f.lines for f in included)
+
     print(
-        f"[llm-review] diff {diff_lines:,}줄 | "
-        f"truncated={truncated} | thinking={THINKING_ENABLED}"
+        f"[llm-review] 파일 {len(file_diffs)}개 | "
+        f"분석 대상 {len(included)}개 ({analyzed_lines:,}줄) | "
+        f"건너뜀 {len(skipped)}개 | "
+        f"trivial {sum(1 for f in file_diffs if f.trivial)}개 | "
+        f"컨텍스트 ±{CONTEXT_LINES}줄 | "
+        f"thinking={THINKING_ENABLED}"
+    )
+    for fd in ordered:
+        tag = "⏭" if fd in skipped else ("💬" if fd.trivial else "✅")
+        print(f"  {tag} {fd.path} (+{fd.added}/-{fd.removed}, {fd.lines}줄)")
+
+    if not included:
+        print("[llm-review] 분석할 파일 없음 (모두 예산 초과), 스킵")
+        return
+
+    diff_for_llm = "".join(f.header + f.content for f in included)
+    summary = build_diff_summary(ordered, skipped)
+
+    print(f"\n[llm-review] {MODEL} 에 리뷰 요청 중...")
+    review, reasoning = call_llm(diff_for_llm)
+
+    comment = build_comment(
+        review=review,
+        reasoning=reasoning,
+        summary=summary,
+        total_lines=total_lines,
+        analyzed_lines=analyzed_lines,
+        skipped_count=len(skipped),
     )
 
-    print(f"[llm-review] {MODEL} 에 리뷰 요청 중...")
-    review, reasoning = call_llm(diff)
-
-    comment = build_comment(review, reasoning, truncated, diff_lines)
     print("\n" + "─" * 60)
     print(comment[:2000], "..." if len(comment) > 2000 else "")
     print("─" * 60 + "\n")
