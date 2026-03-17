@@ -40,6 +40,8 @@ internal/
              store_test.go     apikey 단위 테스트
   config/    config.go         환경변수 로딩
              validate.go       시작 시 검증
+  docs/      handler.go        Swagger UI + OpenAPI spec 서빙 (/docs/)
+             openapi.yaml      OpenAPI 3.0 스펙 (go:embed)
   router/    router.go         모델명 → 업스트림 라우팅 (최장 접두사 우선)
   pii/       pii.go            정규식 + 체크섬 기반 PII 탐지·마스킹
   tokencount/tokencount.go     tiktoken 토큰 카운터 (캐시 포함)
@@ -58,6 +60,8 @@ internal/
     streamer.go                SSE 파싱 + StreamEventParser
 pkg/
   httputil/  httputil.go       공유 HTTP 유틸리티 (RespondErr, CopyHeaders, NewRequestID)
+scripts/
+  llm_review.py               GitLab CI LLM 코드 리뷰 스크립트 (vLLM 호출 → MR 코멘트)
 ```
 
 ---
@@ -120,11 +124,6 @@ curl -X POST http://localhost:8080/admin/keys \
 # 전체 키 목록
 curl http://localhost:8080/admin/keys \
   -H "Authorization: Bearer $ADMIN_API_KEY"
-# → {"keys":[...],"count":N}
-
-# 특정 키 조회
-curl http://localhost:8080/admin/keys/sk-proxy-xxx \
-  -H "Authorization: Bearer $ADMIN_API_KEY"
 
 # 키 폐기 (204 No Content)
 curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
@@ -137,6 +136,19 @@ curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
 | `GET` | `/admin/keys` | 전체 키 목록 |
 | `GET` | `/admin/keys/{key}` | 키 메타데이터 조회 |
 | `DELETE` | `/admin/keys/{key}` | 키 폐기 |
+
+---
+
+## API 문서 (Swagger UI)
+
+`internal/docs/openapi.yaml`을 `//go:embed`로 내장. 외부 의존성 없음.
+
+| 경로 | 내용 |
+|------|------|
+| `GET /docs/` | Swagger UI (CDN 로드) |
+| `GET /docs/openapi.yaml` | OpenAPI 3.0 raw spec |
+
+스펙 수정 시 `internal/docs/openapi.yaml`만 편집. 재빌드하면 바이너리에 반영됨.
 
 ---
 
@@ -173,6 +185,55 @@ curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
 
 ---
 
+## 개발 환경 (VS Code)
+
+`.vscode/launch.json` 에 디버그/테스트 구성 포함. 처음 사용 시:
+
+```bash
+cp .env.example .env   # 실제 값 입력 후 사용
+```
+
+주요 launch 구성:
+- **`Proxy: Run`** — `.env` 기반 서버 기동
+- **`Proxy: Run (dry)`** — upstream 없이 설정만 확인 (Redis 로컬 필요)
+- **`Test: All packages (-race)`** — 전체 테스트
+- **`Test: Current package`** — 현재 열린 파일의 패키지만
+- **`Test: Single function (input)`** — 함수명 입력 → 해당 테스트만
+
+---
+
+## CI/CD (GitLab)
+
+브랜치 전략: `BRANCHING.md` 참조.
+
+| 태그 패턴 | 트리거 | 결과 |
+|-----------|--------|------|
+| `v0.1.0-rc1` | `dev` 브랜치 | dev 환경 자동 배포 |
+| `v0.1.0` | `main` 브랜치 | production 수동 승인 후 배포 |
+
+### LLM 코드 리뷰 (MR 자동)
+MR 오픈 시 `scripts/llm_review.py`가 실행되어 vLLM에 diff를 보내고 결과를 MR 코멘트로 등록.
+
+**diff 필터링 전략** (`scripts/llm_review.py`):
+- 생성 코드 제외: `vendor/`, `*.pb.go`, `mock_*.go`, `*_gen.go`, `zz_generated*.go`
+- `-U15` context 확대 (기본 3줄 → 15줄)
+- 파일 우선순위 정렬: non-trivial → trivial (주석·공백·import만 변경)
+- 파일 단위 budget fill (중간 잘림 방지, 최대 15,000줄)
+
+**모델 설정** (Qwen3.5-122B-A10B 기준, 262K context):
+
+| 파라미터 | 값 | 근거 |
+|----------|----|------|
+| `LLM_MAX_DIFF_LINES` | 15,000 | 262K ctx − 프롬프트/응답/버퍼 ≈ 240K토큰 ÷ 16tok/줄 |
+| `max_tokens` | 8,192 | 대형 MR 전체 분석 여유 |
+| `temperature` | 0.6 | thinking mode가 내부 추론 담당 |
+| `LLM_THINKING` | true | `reasoning_content` → MR `<details>` 접기 |
+| CI timeout | 15분 | thinking 추론 포함 |
+
+필요 CI/CD Variables: `LLM_API_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `GITLAB_TOKEN`
+
+---
+
 ## 주요 환경변수
 
 | 변수 | 기본값 | 설명 |
@@ -191,15 +252,15 @@ curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
 | `AUDIT_HMAC_KEY` | — | 감사 해시 HMAC 키 (미설정=SHA-256) |
 | `LOKI_PUSH_URL` | — | Loki 엔드포인트 (미설정=비활성) |
 
-전체 목록: [ENV.md](./ENV.md)
+전체 목록: [ENV.md](./ENV.md) | 로컬 개발용 템플릿: [.env.example](../.env.example)
 
 ---
 
-## 포트
+## 엔드포인트 & 포트
 
-| 서비스 | 포트 |
-|--------|------|
-| llm-proxy | `8080` (`/healthz`, `/metrics`, `/admin/keys` 포함) |
-| Redis | `6379` |
-| Loki | `3100` |
-| Grafana | `3000` (admin/admin) |
+| 서비스 | 포트 | 주요 경로 |
+|--------|------|-----------|
+| llm-proxy | `8080` | `/v1/*`, `/healthz`, `/metrics`, `/admin/keys`, `/docs/` |
+| Redis | `6379` | — |
+| Loki | `3100` | — |
+| Grafana | `3000` | admin/admin |
