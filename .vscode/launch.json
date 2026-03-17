@@ -1,0 +1,195 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+
+    // ──────────────────────────────────────────────────────────
+    // 프록시 서버 실행 / 디버그
+    // ──────────────────────────────────────────────────────────
+    {
+      "name": "Proxy: Run",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/proxy",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "REDIS_ADDR": "localhost:6379"
+      },
+      "showLog": false
+    },
+    {
+      // 업스트림 없이 로컬에서만 테스트 — fake upstream 없이 설정값만 검증
+      "name": "Proxy: Run (dry — no upstream key)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/cmd/proxy",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "REDIS_ADDR": "localhost:6379",
+        "UPSTREAM_BASE_URL": "http://localhost:9999",
+        "UPSTREAM_API_KEY": "dummy",
+        "PROXY_API_KEYS_JSON": "{\"sk-proxy-test\":\"dev-user\"}",
+        "ADMIN_API_KEY": "admin-dev",
+        "TOKEN_DAILY_LIMIT": "999999",
+        "RATE_LIMIT_RPS": "100",
+        "PII_BLOCK": "false"
+      },
+      "showLog": true
+    },
+
+    // ──────────────────────────────────────────────────────────
+    // 전체 테스트
+    // ──────────────────────────────────────────────────────────
+    {
+      "name": "Test: All packages (-race)",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/...",
+      "args": ["-v", "-count=1", "-race", "-timeout=120s"],
+      "showLog": true
+    },
+    {
+      // 현재 열려 있는 파일의 패키지 테스트
+      "name": "Test: Current package",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${fileDirname}",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      // 커서가 위치한 테스트 함수 하나만 실행 (함수명 직접 입력)
+      "name": "Test: Single function (input)",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${fileDirname}",
+      "args": [
+        "-v", "-count=1", "-race",
+        "-run", "${input:testFuncName}"
+      ],
+      "showLog": true
+    },
+
+    // ──────────────────────────────────────────────────────────
+    // 패키지별 테스트
+    // ──────────────────────────────────────────────────────────
+    {
+      "name": "Test: internal/apikey",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/apikey",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/audit",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/audit",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/proxy (integration)",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/proxy",
+      "args": ["-v", "-count=1", "-race", "-timeout=60s"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/quota",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/quota",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/ratelimit",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/ratelimit",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/middleware",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/middleware",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/router",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/router",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/pii",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/pii",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/breaker",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/breaker",
+      "args": ["-v", "-count=1", "-race"],
+      "showLog": true
+    },
+    {
+      "name": "Test: internal/config",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}/internal/config",
+      "args": ["-v", "-count=1"],
+      "showLog": true
+    }
+  ],
+
+  // ──────────────────────────────────────────────────────────
+  // 복합 구성
+  // ──────────────────────────────────────────────────────────
+  "compounds": [
+    {
+      // 전체 테스트 후 서버 실행 (순차 실행은 지원하지 않으므로 병렬 시작됨)
+      "name": "Test All + Run Proxy",
+      "configurations": ["Test: All packages (-race)", "Proxy: Run (dry — no upstream key)"],
+      "stopAll": true
+    }
+  ],
+
+  // ──────────────────────────────────────────────────────────
+  // 입력 변수
+  // ──────────────────────────────────────────────────────────
+  "inputs": [
+    {
+      "id": "testFuncName",
+      "type": "promptString",
+      "description": "실행할 테스트 함수명 (정규식 가능, 예: TestStore_Create)",
+      "default": "Test"
+    }
+  ]
+}

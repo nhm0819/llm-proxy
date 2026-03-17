@@ -1,0 +1,45 @@
+{
+  // ── Go 테스트 ─────────────────────────────────────────────
+  "go.testFlags": ["-v", "-count=1", "-race"],
+  "go.testTimeout": "120s",
+  "go.coverOnSingleTest": true,
+  "go.coverOnSingleTestFile": true,
+  "go.coverageDecorator": {
+    "type": "gutter",
+    "coveredHighlightColor": "rgba(64,128,64,0.5)",
+    "uncoveredHighlightColor": "rgba(128,64,64,0.4)"
+  },
+
+  // ── Go 도구 ──────────────────────────────────────────────
+  "go.lintTool": "golangci-lint",
+  "go.lintOnSave": "package",
+  "go.vetOnSave": "package",
+  "go.buildOnSave": "package",
+  "go.useLanguageServer": true,
+  "gopls": {
+    "ui.semanticTokens": true,
+    "ui.documentation.linksInHover": true,
+    "build.buildFlags": ["-race"]
+  },
+
+  // ── 에디터 ───────────────────────────────────────────────
+  "editor.formatOnSave": true,
+  "[go]": {
+    "editor.defaultFormatter": "golang.go",
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+
+  // ── 파일 탐색기 제외 ─────────────────────────────────────
+  "files.exclude": {
+    "**/.git": true,
+    "**/vendor": true
+  },
+  "search.exclude": {
+    "**/vendor": true,
+    "**/*.pb.go": true,
+    "**/*_gen.go": true,
+    "**/zz_generated*.go": true
+  }
+}
