@@ -1,22 +1,25 @@
-// Package apikey manages proxy API keys backed by Redis.
-// Keys are stored as Redis Hashes (apikey:<key>) and indexed in a Redis Set
-// (apikeys:index).  The store satisfies middleware.KeyResolver so it can be
-// plugged directly into the auth middleware.
+// Package apikey manages proxy API keys backed by PostgreSQL (primary) with
+// Redis as a read-through cache.  The store satisfies middleware.KeyResolver
+// so it can be plugged directly into the auth middleware.
 package apikey
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	indexKey  = "apikeys:index"
-	keyPrefix = "apikey:"
+	cachePrefix = "cache:apikey:"
+	defaultTTL  = 5 * time.Minute
 )
 
 // ErrNotFound is returned when a key does not exist (or has expired).
@@ -31,92 +34,98 @@ type Key struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
-// Store manages proxy API keys in Redis.
+// Store manages proxy API keys with PostgreSQL as the primary store and Redis
+// as a TTL-based read-through cache.
 type Store struct {
-	rdb *redis.Client
+	pool     *pgxpool.Pool
+	rdb      *redis.Client
+	cacheTTL time.Duration
 }
 
-// New creates a Store backed by rdb.
-func New(rdb *redis.Client) *Store {
-	return &Store{rdb: rdb}
+// New creates a Store backed by a PostgreSQL pool and Redis cache.
+func New(pool *pgxpool.Pool, rdb *redis.Client) *Store {
+	return &Store{
+		pool:     pool,
+		rdb:      rdb,
+		cacheTTL: defaultTTL,
+	}
 }
 
-// Create generates a new key for userID and persists it.
-// expiresAt is optional; if set the Redis key TTL is aligned to that time.
+// Create generates a new key for userID, inserts it into PostgreSQL, and
+// populates the Redis cache.
 func (s *Store) Create(ctx context.Context, userID, description string, expiresAt *time.Time) (Key, error) {
-	key := generateKey()
 	k := Key{
-		Key:         key,
+		Key:         generateKey(),
 		UserID:      userID,
 		Description: description,
 		CreatedAt:   time.Now().UTC(),
 		ExpiresAt:   expiresAt,
 	}
 
-	fields := map[string]any{
-		"user_id":     userID,
-		"description": description,
-		"created_at":  k.CreatedAt.Format(time.RFC3339),
-	}
-	if expiresAt != nil {
-		fields["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO api_keys (key, user_id, description, created_at, expires_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		k.Key, k.UserID, k.Description, k.CreatedAt, k.ExpiresAt,
+	)
+	if err != nil {
+		return Key{}, fmt.Errorf("apikey: insert: %w", err)
 	}
 
-	pipe := s.rdb.Pipeline()
-	pipe.HSet(ctx, keyPrefix+key, fields)
-	if expiresAt != nil {
-		pipe.ExpireAt(ctx, keyPrefix+key, *expiresAt)
-	}
-	pipe.SAdd(ctx, indexKey, key)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return Key{}, err
-	}
+	_ = s.cacheSet(ctx, k)
 	return k, nil
 }
 
 // Get returns the metadata for key. Returns ErrNotFound if missing or expired.
 func (s *Store) Get(ctx context.Context, key string) (Key, error) {
-	vals, err := s.rdb.HGetAll(ctx, keyPrefix+key).Result()
+	// Try cache first.
+	if k, err := s.cacheGet(ctx, key); err == nil {
+		return k, nil
+	}
+
+	// Cache miss — query PostgreSQL.
+	k, err := s.pgGet(ctx, key)
 	if err != nil {
 		return Key{}, err
 	}
-	if len(vals) == 0 {
-		return Key{}, ErrNotFound
-	}
-	return parseKey(key, vals)
+
+	_ = s.cacheSet(ctx, k)
+	return k, nil
 }
 
-// Delete removes a key from Redis and the index.
+// Delete removes a key from both Redis cache and PostgreSQL.
 func (s *Store) Delete(ctx context.Context, key string) error {
-	pipe := s.rdb.Pipeline()
-	pipe.Del(ctx, keyPrefix+key)
-	pipe.SRem(ctx, indexKey, key)
-	_, err := pipe.Exec(ctx)
-	return err
+	// Invalidate cache first to avoid stale reads.
+	s.rdb.Del(ctx, cachePrefix+key)
+
+	tag, err := s.pool.Exec(ctx, `DELETE FROM api_keys WHERE key = $1`, key)
+	if err != nil {
+		return fmt.Errorf("apikey: delete: %w", err)
+	}
+	_ = tag // we don't error on not-found for delete
+	return nil
 }
 
-// List returns all non-expired keys.  Stale index entries (expired TTL) are
-// pruned automatically.
+// List returns all non-expired keys directly from PostgreSQL (no cache).
 func (s *Store) List(ctx context.Context) ([]Key, error) {
-	members, err := s.rdb.SMembers(ctx, indexKey).Result()
+	rows, err := s.pool.Query(ctx,
+		`SELECT key, user_id, description, created_at, expires_at
+		 FROM api_keys
+		 WHERE expires_at IS NULL OR expires_at > now()
+		 ORDER BY created_at DESC`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("apikey: list: %w", err)
 	}
+	defer rows.Close()
 
-	out := make([]Key, 0, len(members))
-	for _, m := range members {
-		k, err := s.Get(ctx, m)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				// Key has expired or been deleted; clean up the index silently.
-				_ = s.rdb.SRem(ctx, indexKey, m)
-				continue
-			}
-			return nil, err
+	var out []Key
+	for rows.Next() {
+		var k Key
+		if err := rows.Scan(&k.Key, &k.UserID, &k.Description, &k.CreatedAt, &k.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("apikey: scan: %w", err)
 		}
 		out = append(out, k)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // Resolve implements middleware.KeyResolver.
@@ -136,55 +145,67 @@ func (s *Store) Resolve(ctx context.Context, key string) (string, bool, error) {
 }
 
 // SeedFromMap imports keys from a static map (e.g. PROXY_API_KEYS_JSON) into
-// Redis, skipping any key that already exists.  This enables a one-time
+// PostgreSQL, skipping any key that already exists. This enables a one-time
 // migration from the legacy env-var approach.
 func (s *Store) SeedFromMap(ctx context.Context, m map[string]string) error {
 	for key, userID := range m {
-		exists, err := s.rdb.Exists(ctx, keyPrefix+key).Result()
+		_, err := s.pool.Exec(ctx,
+			`INSERT INTO api_keys (key, user_id, description)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (key) DO NOTHING`,
+			key, userID, "seeded from PROXY_API_KEYS_JSON",
+		)
 		if err != nil {
-			return err
-		}
-		if exists > 0 {
-			continue
-		}
-		pipe := s.rdb.Pipeline()
-		pipe.HSet(ctx, keyPrefix+key, map[string]any{
-			"user_id":     userID,
-			"description": "seeded from PROXY_API_KEYS_JSON",
-			"created_at":  time.Now().UTC().Format(time.RFC3339),
-		})
-		pipe.SAdd(ctx, indexKey, key)
-		if _, err := pipe.Exec(ctx); err != nil {
-			return err
+			return fmt.Errorf("apikey: seed %q: %w", key, err)
 		}
 	}
 	return nil
 }
 
-// ---------- helpers ----------
+// ---------- PostgreSQL helpers ----------
+
+func (s *Store) pgGet(ctx context.Context, key string) (Key, error) {
+	var k Key
+	err := s.pool.QueryRow(ctx,
+		`SELECT key, user_id, description, created_at, expires_at
+		 FROM api_keys WHERE key = $1`, key,
+	).Scan(&k.Key, &k.UserID, &k.Description, &k.CreatedAt, &k.ExpiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Key{}, ErrNotFound
+		}
+		return Key{}, fmt.Errorf("apikey: select: %w", err)
+	}
+	return k, nil
+}
+
+// ---------- Redis cache helpers ----------
+
+func (s *Store) cacheGet(ctx context.Context, key string) (Key, error) {
+	data, err := s.rdb.Get(ctx, cachePrefix+key).Bytes()
+	if err != nil {
+		return Key{}, err
+	}
+	var k Key
+	if err := json.Unmarshal(data, &k); err != nil {
+		return Key{}, err
+	}
+	return k, nil
+}
+
+func (s *Store) cacheSet(ctx context.Context, k Key) error {
+	data, err := json.Marshal(k)
+	if err != nil {
+		return err
+	}
+	return s.rdb.Set(ctx, cachePrefix+k.Key, data, s.cacheTTL).Err()
+}
+
+// ---------- key generation ----------
 
 // generateKey produces a random "sk-proxy-<48 hex chars>" key.
 func generateKey() string {
 	b := make([]byte, 24)
 	_, _ = rand.Read(b)
 	return "sk-proxy-" + hex.EncodeToString(b)
-}
-
-func parseKey(key string, vals map[string]string) (Key, error) {
-	k := Key{
-		Key:         key,
-		UserID:      vals["user_id"],
-		Description: vals["description"],
-	}
-	if s := vals["created_at"]; s != "" {
-		t, _ := time.Parse(time.RFC3339, s)
-		k.CreatedAt = t
-	}
-	if s := vals["expires_at"]; s != "" {
-		t, err := time.Parse(time.RFC3339, s)
-		if err == nil {
-			k.ExpiresAt = &t
-		}
-	}
-	return k, nil
 }

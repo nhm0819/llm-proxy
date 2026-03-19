@@ -40,6 +40,9 @@ type Config struct {
 	// PII policy
 	PIIBlock bool
 
+	// PostgreSQL
+	DatabaseURL string
+
 	// Redis connection
 	RedisAddr     string
 	RedisPassword string
@@ -84,6 +87,8 @@ func Load() Config {
 		LokiLabels:  parseKVEnv(os.Getenv("LOKI_LABELS")),
 
 		PIIBlock: envBool(false, "PII_BLOCK"),
+
+		DatabaseURL:   os.Getenv("DATABASE_URL"),
 
 		RedisAddr:     envStr("localhost:6379", "REDIS_ADDR"),
 		RedisPassword: os.Getenv("REDIS_PASSWORD"),

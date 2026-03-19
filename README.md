@@ -62,6 +62,11 @@ OpenAI-compatible LLM API 요청을 여러 업스트림 백엔드로 라우팅�
 ```
 cmd/proxy/main.go                  진입점, 의존성 조립 (DI root)
 internal/
+  apikey/          store.go        PG primary + Redis cache 기반 API 키 CRUD + Resolve
+                   handler.go      Admin HTTP 핸들러 (/admin/keys)
+                   migrate.go      go:embed + RunMigrations (시작 시 자동 실행)
+                   store_test.go   apikey 통합 테스트 (testcontainers-go + miniredis)
+                   migrations/001_create_api_keys.sql
   config/          config.go       환경변수 로딩 + 시작 시 검증
                    validate.go
   router/          router.go       모델명 접두사 → 업스트림 RouteRule 선택
@@ -198,11 +203,12 @@ docker compose up -d
 컨테이너 상태 확인:
 
 ```
-CONTAINER             STATUS
-llm-proxy-proxy-1      Up  (healthy)
-llm-proxy-redis-1      Up  (healthy)
-llm-proxy-loki-1       Up
-llm-proxy-grafana-1    Up
+CONTAINER               STATUS
+llm-proxy-proxy-1        Up  (healthy)
+llm-proxy-postgres-1     Up  (healthy)
+llm-proxy-redis-1        Up  (healthy)
+llm-proxy-loki-1         Up
+llm-proxy-grafana-1      Up
 ```
 
 ### 3. 동작 확인
@@ -267,7 +273,8 @@ docker compose down -v
 | 서비스 | 로컬 포트 | 설명 |
 |--------|-----------|------|
 | llm-proxy | `8080` | 프록시 API + `/healthz` + `/metrics` |
-| Redis | `6379` | 직접 접근 필요 시 (기본 비노출 가능) |
+| PostgreSQL | `5432` | API 키 primary 저장소 |
+| Redis | `6379` | 캐시 + 할당량·RPS·감사 (직접 접근 필요 시) |
 | Loki | `3100` | 로그 수집 엔드포인트 |
 | Grafana | `3000` | 대시보드 (`admin` / `admin`) |
 
@@ -340,6 +347,7 @@ metadata:
 type: Opaque
 stringData:
   UPSTREAM_API_KEY: "sk-..."          # 업스트림 실제 API 키
+  DATABASE_URL: "postgres://llm_proxy:password@postgres.db.svc.cluster.local:5432/llm_proxy?sslmode=require"
   PROXY_API_KEYS_JSON: |
     {
       "sk-proxy-service-a": "service-a",
@@ -656,7 +664,8 @@ kubectl rollout undo deployment/llm-proxy -n llm-proxy
 
 | 항목 | 설명 |
 |------|------|
-| ✅ Secret 분리 | `PROXY_API_KEYS_JSON`, `UPSTREAM_API_KEY`, `AUDIT_HMAC_KEY`를 Secret으로 관리 |
+| ✅ Secret 분리 | `DATABASE_URL`, `PROXY_API_KEYS_JSON`, `UPSTREAM_API_KEY`, `AUDIT_HMAC_KEY`를 Secret으로 관리 |
+| ✅ PostgreSQL HA | 프로덕션에서는 PG Replication 또는 관리형 DB(RDS, Cloud SQL 등) 사용 |
 | ✅ Redis HA | Redis Sentinel 또는 Redis Cluster 사용 (단일 Redis는 SPOF) |
 | ✅ 이미지 태그 고정 | `latest` 대신 Git SHA 태그 사용 |
 | ✅ Resource 요청/제한 | OOM Kill 방지를 위해 limits 명시 |
@@ -682,7 +691,10 @@ kubectl rollout undo deployment/llm-proxy -n llm-proxy
 UPSTREAM_BASE_URL=https://api.openai.com
 UPSTREAM_API_KEY=sk-...
 
-# Redis
+# PostgreSQL (API 키 primary 저장소)
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/llm_proxy?sslmode=disable
+
+# Redis (캐시 + 할당량/RPS/감사)
 REDIS_ADDR=localhost:6379
 
 # 프록시 인증 키 (빈 값 = 인증 없음, 개발 전용)
@@ -693,6 +705,7 @@ PROXY_API_KEYS_JSON='{"sk-proxy-alice":"alice","sk-proxy-bob":"bob"}'
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
+| `DATABASE_URL` | — | PostgreSQL DSN (`postgres://user:pass@host:5432/db?sslmode=disable`) |
 | `TOKEN_DAILY_LIMIT` | `200000` | 사용자별 일일 토큰 한도 |
 | `TOKEN_SAFETY_FACTOR` | `1.20` | 토큰 예약 시 안전 계수 (과소 예약 방지) |
 | `RATE_LIMIT_RPS` | `5` | 사용자별 초당 요청 수 |
@@ -973,8 +986,9 @@ LOKI_LABELS=app=llm-proxy,env=production
 ### 사전 요구사항
 
 - Go 1.25+
+- PostgreSQL 15+
 - Redis 7+
-- Docker (선택)
+- Docker (apikey 통합 테스트에 필요; 없으면 해당 테스트 자동 skip)
 
 ### 로컬 실행
 
@@ -982,10 +996,17 @@ LOKI_LABELS=app=llm-proxy,env=production
 # 의존성 설치
 go mod download
 
+# PostgreSQL 실행 (Docker)
+docker run -d -p 5432:5432 \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=llm_proxy \
+  postgres:17-alpine
+
 # Redis 실행 (Docker)
 docker run -d -p 6379:6379 redis:7-alpine
 
 # 프록시 실행 (인증 없음, dev mode)
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/llm_proxy?sslmode=disable \
 UPSTREAM_API_KEY=sk-... \
 UPSTREAM_BASE_URL=https://api.openai.com \
 go run ./cmd/proxy
@@ -994,8 +1015,11 @@ go run ./cmd/proxy
 ### 테스트
 
 ```bash
-# 전체 테스트 (miniredis 사용, 실제 Redis 불필요)
+# 전체 테스트 (apikey 패키지는 Docker 필요 — 없으면 자동 skip)
 go test ./...
+
+# Docker 없는 환경: 통합 테스트 제외
+go test -short ./...
 
 # 레이스 컨디션 검사
 go test -race ./...
@@ -1017,6 +1041,7 @@ go tool cover -html=coverage.out
 | `audit` | Stream 기록, HMAC vs SHA-256, TTL 검증 |
 | `breaker` | Closed→Open→HalfOpen 전이, 성공 시 카운터 리셋 |
 | `middleware` | 키 검증, userID 주입, Authorization 헤더 스트립 |
+| `apikey` | testcontainers-go (PostgreSQL 컨테이너) + miniredis; Docker 없으면 자동 skip |
 | `proxy/classify` | 경로 분류, 메시지 텍스트 추출, 토큰 파라미터 파싱 |
 | `proxy/stream` | SSE 이벤트 파싱, 엑서프트 트런케이션 |
 | `proxy` (통합) | E2E: 성공·429·PII 차단·스트리밍·동시성 20개 고루틴 |
@@ -1050,6 +1075,13 @@ llm-proxy/
 │   └── proxy/
 │       └── main.go                  진입점 · DI 조립
 ├── internal/
+│   ├── apikey/
+│   │   ├── store.go                 PG primary + Redis cache 기반 API 키 CRUD + Resolve
+│   │   ├── handler.go               Admin HTTP 핸들러 (/admin/keys)
+│   │   ├── migrate.go               go:embed + RunMigrations
+│   │   ├── store_test.go            통합 테스트 (testcontainers-go + miniredis)
+│   │   └── migrations/
+│   │       └── 001_create_api_keys.sql
 │   ├── config/
 │   │   ├── config.go                환경변수 로딩
 │   │   └── validate.go              시작 시 검증

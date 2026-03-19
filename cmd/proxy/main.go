@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/nhm0819/llm-proxy/internal/apikey"
@@ -35,17 +36,27 @@ func main() {
 	}
 
 	rdb := mustRedis(cfg)
+	pool := mustPostgres(cfg)
+	defer pool.Close()
 
-	// ── API key store (Redis-backed) ─────────────────────────────────────────
-	keyStore := apikey.New(rdb)
+	// ── Run database migrations ─────────────────────────────────────────
+	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer migrateCancel()
+	if err := apikey.RunMigrations(migrateCtx, pool); err != nil {
+		log.Fatalf("database migration failed: %v", err)
+	}
+	log.Println("database migrations applied")
 
-	// Seed static keys from PROXY_API_KEYS_JSON into Redis (one-time migration).
+	// ── API key store (PG primary + Redis cache) ────────────────────────
+	keyStore := apikey.New(pool, rdb)
+
+	// Seed static keys from PROXY_API_KEYS_JSON into PostgreSQL (idempotent).
 	staticKeys := middleware.LoadStaticKeyRegistry()
 	if len(staticKeys) > 0 {
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer seedCancel()
 		if err := keyStore.SeedFromMap(seedCtx, staticKeys); err != nil {
-			log.Printf("warn: failed to seed static API keys into Redis: %v", err)
+			log.Printf("warn: failed to seed static API keys into PostgreSQL: %v", err)
 		}
 	}
 
@@ -148,6 +159,24 @@ func mustRedis(cfg config.Config) *redis.Client {
 	}
 	log.Printf("redis connected: %s db=%d", cfg.RedisAddr, cfg.RedisDB)
 	return rdb
+}
+
+func mustPostgres(cfg config.Config) *pgxpool.Pool {
+	if cfg.DatabaseURL == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("postgres pool creation failed: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("postgres ping failed: %v", err)
+	}
+	cc := pool.Config().ConnConfig
+	log.Printf("postgres connected: %s:%d/%s", cc.Host, cc.Port, cc.Database)
+	return pool
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
