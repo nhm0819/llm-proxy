@@ -144,3 +144,74 @@ func TestSecondsUntilMidnight(t *testing.T) {
 		t.Errorf("expected 86400, got %d", s2)
 	}
 }
+
+func TestReserve_Concurrent(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	key := "quota:concurrent:20240101"
+	limit := 1000
+	amount := 100
+
+	// Run 10 goroutines each reserving 100 tokens
+	errs := make(chan error, 10)
+	for range 10 {
+		go func() {
+			_, err := store.Reserve(ctx, key, limit, amount, 3600)
+			errs <- err
+		}()
+	}
+
+	for range 10 {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent reserve error: %v", err)
+		}
+	}
+
+	// Verify total: should be exactly 1000 (10 x 100)
+	res, err := store.Reserve(ctx, key, limit, 1, 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK {
+		t.Error("expected no more capacity after 10 x 100 = 1000")
+	}
+	if res.Used != 1000 {
+		t.Errorf("expected used=1000, got %d", res.Used)
+	}
+}
+
+func TestReserve_MultipleKeys_Independent(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	// Exhaust key1
+	_, _ = store.Reserve(ctx, "quota:a:20240101", 100, 100, 3600)
+
+	// key2 should still have capacity
+	res, err := store.Reserve(ctx, "quota:b:20240101", 100, 50, 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK {
+		t.Error("different key should have independent quota")
+	}
+}
+
+func TestDayKey_SingleDigitMonth(t *testing.T) {
+	loc, _ := time.LoadLocation("UTC")
+	ts := time.Date(2024, 1, 9, 0, 0, 0, 0, loc)
+	key := quota.DayKey("user", ts)
+	if key != "quota:user:20240109" {
+		t.Errorf("expected zero-padded key, got %q", key)
+	}
+}
+
+func TestSecondsUntilMidnight_ClampMin(t *testing.T) {
+	loc, _ := time.LoadLocation("UTC")
+	// Exactly at midnight boundary
+	ts := time.Date(2024, 1, 1, 23, 59, 59, 999999999, loc)
+	s := quota.SecondsUntilMidnight(ts)
+	if s < 1 {
+		t.Errorf("should clamp to at least 1 second, got %d", s)
+	}
+}

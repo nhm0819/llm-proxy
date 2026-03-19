@@ -60,7 +60,7 @@ func TestBreaker_OpensAfterMaxFailures(t *testing.T) {
 	mock := &mockTransport{statusFn: func(_ int) int { return 500 }}
 	b := breaker.New(mock, breaker.BreakerConfig{MaxFailures: 3, OpenTimeout: time.Hour})
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _ = b.RoundTrip(newReq(t))
 	}
 
@@ -83,7 +83,7 @@ func TestBreaker_HalfOpenAfterTimeout(t *testing.T) {
 		OpenTimeout: 10 * time.Millisecond,
 	})
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _ = b.RoundTrip(newReq(t))
 	}
 
@@ -115,7 +115,7 @@ func TestBreaker_NetworkError_Counts(t *testing.T) {
 	mock := &mockTransport{errFn: func(_ int) error { return errors.New("connection refused") }}
 	b := breaker.New(mock, breaker.BreakerConfig{MaxFailures: 2, OpenTimeout: time.Hour})
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		_, _ = b.RoundTrip(newReq(t))
 	}
 
@@ -141,7 +141,7 @@ func TestBreaker_SuccessResetFailures(t *testing.T) {
 	_, _ = b.RoundTrip(newReq(t)) // success – should reset counter
 
 	// 4 more failures should NOT open the circuit (counter was reset)
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		mock.statusFn = func(_ int) int { return 500 }
 		_, _ = b.RoundTrip(newReq(t))
 	}
@@ -150,4 +150,98 @@ func TestBreaker_SuccessResetFailures(t *testing.T) {
 		t.Error("circuit should not be open; success should have reset failure count")
 	}
 	_ = calls
+}
+
+func TestBreaker_PerHost_IndependentCircuits(t *testing.T) {
+	mock := &mockTransport{statusFn: func(_ int) int { return 500 }}
+	b := breaker.New(mock, breaker.BreakerConfig{MaxFailures: 2, OpenTimeout: time.Hour})
+
+	// Trip circuit for host A
+	reqA, _ := http.NewRequest("POST", "https://api-a.example.com/v1/chat", nil)
+	for range 2 {
+		_, _ = b.RoundTrip(reqA)
+	}
+
+	if b.State("api-a.example.com") != breaker.StateOpen {
+		t.Error("host A circuit should be open")
+	}
+
+	// Host B should still be closed
+	if b.State("api-b.example.com") != breaker.StateClosed {
+		t.Error("host B circuit should be closed (independent)")
+	}
+
+	// Requests to host B should still go through
+	mock.statusFn = func(_ int) int { return 200 }
+	reqB, _ := http.NewRequest("POST", "https://api-b.example.com/v1/chat", nil)
+	resp, err := b.RoundTrip(reqB)
+	if err != nil {
+		t.Fatalf("host B request should succeed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 from host B, got %d", resp.StatusCode)
+	}
+}
+
+func TestBreaker_HalfOpen_ProbeFail_Reopens(t *testing.T) {
+	mock := &mockTransport{statusFn: func(_ int) int { return 500 }}
+	b := breaker.New(mock, breaker.BreakerConfig{
+		MaxFailures: 2,
+		OpenTimeout: 10 * time.Millisecond,
+	})
+
+	// Trip circuit
+	for range 2 {
+		_, _ = b.RoundTrip(newReq(t))
+	}
+
+	// Wait for half-open
+	time.Sleep(20 * time.Millisecond)
+
+	// Probe fails (still returning 500)
+	_, _ = b.RoundTrip(newReq(t))
+
+	// Should be back to open
+	if b.State("api.openai.com") != breaker.StateOpen {
+		t.Error("failed probe should reopen circuit")
+	}
+}
+
+func TestBreaker_DefaultConfig(t *testing.T) {
+	mock := &mockTransport{}
+	b := breaker.New(mock, breaker.BreakerConfig{}) // all zero values
+
+	resp, err := b.RoundTrip(newReq(t))
+	if err != nil {
+		t.Fatalf("default config should work: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestState_String(t *testing.T) {
+	tests := []struct {
+		state    breaker.State
+		expected string
+	}{
+		{breaker.StateClosed, "closed"},
+		{breaker.StateOpen, "open"},
+		{breaker.StateHalfOpen, "half-open"},
+	}
+	for _, tt := range tests {
+		if got := tt.state.String(); got != tt.expected {
+			t.Errorf("State(%d).String() = %q, want %q", tt.state, got, tt.expected)
+		}
+	}
+}
+
+func TestBreaker_State_UnknownHost(t *testing.T) {
+	mock := &mockTransport{}
+	b := breaker.New(mock, breaker.BreakerConfig{})
+
+	// Unknown host should return Closed
+	if s := b.State("unknown.example.com"); s != breaker.StateClosed {
+		t.Errorf("unknown host should be Closed, got %s", s)
+	}
 }
