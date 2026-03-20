@@ -3,6 +3,7 @@ package ratelimit_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -54,7 +55,7 @@ func TestAllow_ExceedsLimit(t *testing.T) {
 	limit := 2
 
 	// exhaust the limit
-	for i := 0; i < limit; i++ {
+	for range limit {
 		_, _ = store.Allow(ctx, "user3", limit)
 	}
 
@@ -75,7 +76,7 @@ func TestAllow_DifferentUsers_Independent(t *testing.T) {
 	ctx := context.Background()
 
 	// user-a exhausts their limit
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _ = store.Allow(ctx, "user-a", 3)
 	}
 
@@ -86,5 +87,51 @@ func TestAllow_DifferentUsers_Independent(t *testing.T) {
 	}
 	if !res.OK {
 		t.Error("user-b should not be affected by user-a's limit")
+	}
+}
+
+func TestAllow_TTLExpiry_Resets(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+
+	// Exhaust limit
+	for range 3 {
+		_, _ = store.Allow(ctx, "user-ttl", 3)
+	}
+
+	// Verify blocked
+	res, _ := store.Allow(ctx, "user-ttl", 3)
+	if res.OK {
+		t.Fatal("expected blocked after limit exhausted")
+	}
+
+	// Fast-forward time in miniredis (TTL is 2 seconds)
+	mr.FastForward(3 * time.Second)
+
+	// After TTL expiry the counter resets, new request should pass
+	res, err := store.Allow(ctx, "user-ttl", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK {
+		t.Error("expected allowed after TTL expiry")
+	}
+	if res.Count != 1 {
+		t.Errorf("expected count=1 after reset, got %d", res.Count)
+	}
+}
+
+func TestAllow_LimitOfOne(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	res, _ := store.Allow(ctx, "user-one", 1)
+	if !res.OK {
+		t.Error("first request with limit=1 should pass")
+	}
+
+	res, _ = store.Allow(ctx, "user-one", 1)
+	if res.OK {
+		t.Error("second request with limit=1 should be blocked")
 	}
 }

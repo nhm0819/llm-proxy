@@ -42,23 +42,30 @@ internal/
              handler.go        Admin HTTP 핸들러 (/admin/keys)
              migrate.go        go:embed + RunMigrations (시작 시 자동 실행)
              store_test.go     apikey 통합 테스트 (testcontainers-go + miniredis)
+             handler_test.go   Admin REST API CRUD + 인증 테스트 (Docker skip)
              migrations/
                001_create_api_keys.sql  api_keys 테이블 DDL
   config/    config.go         환경변수 로딩
              validate.go       시작 시 검증
+             config_test.go    Load() 기본값·오버라이드·ROUTES_JSON 테스트
   docs/      handler.go        Swagger UI + OpenAPI spec 서빙 (/docs/)
              openapi.yaml      OpenAPI 3.0 스펙 (go:embed)
+             handler_test.go   spec/UI 엔드포인트, Cache-Control 헤더 테스트
   router/    router.go         모델명 → 업스트림 라우팅 (최장 접두사 우선)
   pii/       pii.go            정규식 + 체크섬 기반 PII 탐지·마스킹
   tokencount/tokencount.go     tiktoken 토큰 카운터 (캐시 포함)
+             tokencount_test.go Count 함수·캐시·fallback 테스트
   quota/     quota.go          Redis Lua: 원자적 예약(reserve) + 정산(adjust)
   ratelimit/ ratelimit.go      Redis Lua: 고정 윈도우 RPS 카운터
   audit/     audit.go          Redis Stream 감사 기록 + HashBuilder (HMAC-SHA256)
   loki/      loki.go           Loki Push API HTTP 클라이언트
+             loki_test.go      Push no-op·httptest mock·라벨 머지·에러 처리 테스트
   breaker/   breaker.go        per-upstream 회로 차단기 (RoundTripper 래핑)
   metrics/   metrics.go        Prometheus Counter / Histogram / Gauge 등록
+             metrics_test.go   custom registry로 메트릭 등록/기록 검증 테스트
   middleware/
     middleware.go              Recover · RequestID · AccessLog · MaxBody
+    middleware_test.go         RequestID·Recover·MaxBody·Chain·AccessLog 테스트
     auth.go                    KeyResolver 인터페이스 + AuthAPIKey 미들웨어
   proxy/
     proxy.go                   핵심 ServeHTTP 핸들러
@@ -66,6 +73,7 @@ internal/
     streamer.go                SSE 파싱 + StreamEventParser
 pkg/
   httputil/  httputil.go       공유 HTTP 유틸리티 (RespondErr, CopyHeaders, NewRequestID)
+             httputil_test.go  CopyHeaders·RespondErr·NewRequestID 유닛테스트
 scripts/
   llm_review.py               GitLab CI LLM 코드 리뷰 스크립트 (vLLM 호출 → MR 코멘트)
 ```
@@ -201,13 +209,23 @@ curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
 
 ## 테스트 가이드
 
+현재 커버리지: **73.4%** (54.5% → +18.9pp, 2026-03-20 기준)
+
 | 패키지 | 테스트 방식 |
 |--------|------------|
 | `apikey` | testcontainers-go (실제 PostgreSQL 컨테이너) + miniredis; Docker 미실행 시 자동 skip (`-short` 플래그 또는 Docker 데몬 없을 때) |
+| `apikey` (handler) | Admin REST API CRUD + 인증 + disabled + method not allowed (12개, Docker skip) |
 | `audit` | miniredis + redis 클라이언트(`rdb.XRange`, `rdb.HGetAll`)로 검증 — miniredis 직접 메서드 사용 금지 |
-| `quota`, `ratelimit` | miniredis + redis 클라이언트 |
+| `quota`, `ratelimit` | miniredis + redis 클라이언트; concurrent Reserve·독립 키·TTL 만료·limit=1 엣지 케이스 포함 |
 | `proxy` (통합) | `httptest.Server` fake upstream + miniredis; `StaticKeyRegistry` 사용 |
-| `breaker`, `pii`, `router` | 순수 단위 테스트 |
+| `breaker`, `pii`, `router` | 순수 단위 테스트; per-host 독립 circuit·probe fail reopens·State String 포함 |
+| `config` | Load() 기본값, 환경변수 오버라이드, ROUTES_JSON 파싱 (7개) |
+| `middleware` | RequestID, Recover, MaxBody, Chain, AccessLog (9개) |
+| `httputil` | CopyHeaders, RespondErr, NewRequestID (7개) |
+| `tokencount` | Count 함수, 캐시, fallback (6개) |
+| `loki` | Push no-op, httptest mock, 라벨 머지, 에러 처리 (5개) |
+| `metrics` | custom registry로 메트릭 등록/기록 검증 (7개) |
+| `docs` | spec/UI 엔드포인트, Cache-Control 헤더 (3개) |
 
 **중요**: miniredis v2.33.0은 `XRange`, `HGetAll` 직접 메서드 없음. `TTL`은 `time.Duration` 단일 반환.
 
