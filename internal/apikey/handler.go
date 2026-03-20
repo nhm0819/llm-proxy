@@ -1,6 +1,7 @@
 package apikey
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -163,7 +164,7 @@ func (h *Handler) auth(next http.Handler) http.Handler {
 			httputil.RespondErr(w, http.StatusUnauthorized, "auth_error", "missing Authorization header")
 			return
 		}
-		if token != h.adminKey {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(h.adminKey)) != 1 {
 			httputil.RespondErr(w, http.StatusUnauthorized, "auth_error", "invalid admin key")
 			return
 		}
