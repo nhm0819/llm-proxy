@@ -132,7 +132,7 @@ cd llm-proxy
 # 환경변수 설정
 export OPENAI_API_KEY=sk-...
 
-# 실행 (proxy + Redis + Loki + Grafana)
+# 실행 (proxy + PostgreSQL + Redis + Loki + Grafana + Alloy + Prometheus)
 docker compose up -d
 
 # 동작 확인
@@ -174,7 +174,7 @@ X-Request-ID: 3f2a1b...
 
 ## 로컬 개발 환경 (Docker)
 
-로컬에서 프록시 전체 스택(프록시 + Redis + Loki + Grafana)을 한 번에 띄울 수 있습니다.
+로컬에서 프록시 전체 스택(프록시 + PostgreSQL + Redis + Loki + Grafana + Alloy + Prometheus)을 한 번에 띄울 수 있습니다.
 
 ### 1. 사전 준비
 
@@ -203,12 +203,14 @@ docker compose up -d
 컨테이너 상태 확인:
 
 ```
-CONTAINER               STATUS
-llm-proxy-proxy-1        Up  (healthy)
-llm-proxy-postgres-1     Up  (healthy)
-llm-proxy-redis-1        Up  (healthy)
-llm-proxy-loki-1         Up
-llm-proxy-grafana-1      Up
+CONTAINER                STATUS
+llm-proxy-proxy-1         Up  (healthy)
+llm-proxy-postgres-1      Up  (healthy)
+llm-proxy-redis-1         Up  (healthy)
+llm-proxy-loki-1          Up
+llm-proxy-grafana-1       Up
+llm-proxy-alloy-1         Up
+llm-proxy-prometheus-1    Up
 ```
 
 ### 3. 동작 확인
@@ -231,13 +233,15 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-### 4. Grafana 로그 확인
+### 4. Grafana 확인
 
 브라우저에서 `http://localhost:3000` 접속 (admin / admin).
 
-1. **Connections → Data sources → Add** 클릭
-2. **Loki** 선택, URL에 `http://loki:3100` 입력 후 Save
-3. **Explore** 탭에서 쿼리: `{app="llm-proxy"}`
+Prometheus와 Loki 데이터소스는 `config/grafana/provisioning/datasources/datasources.yml`로 자동 등록됩니다. 별도 설정 없이 바로 사용 가능합니다.
+
+- **Explore → Loki** 탭에서 쿼리: `{app="llm-proxy"}`
+- **Explore → Prometheus** 탭에서 쿼리: `llm_proxy_requests_total`
+- Prometheus UI는 `http://localhost:9090`에서 직접 조회 가능
 
 ### 5. Redis 감사 로그 확인
 
@@ -276,7 +280,9 @@ docker compose down -v
 | PostgreSQL | `5432` | API 키 primary 저장소 |
 | Redis | `6379` | 캐시 + 할당량·RPS·감사 (직접 접근 필요 시) |
 | Loki | `3100` | 로그 수집 엔드포인트 |
-| Grafana | `3000` | 대시보드 (`admin` / `admin`) |
+| Grafana | `3000` | 대시보드 (`admin` / `admin`) — datasource 자동 provisioning |
+| Grafana Alloy | `12345` | 메트릭 수집 에이전트 (proxy scrape → Prometheus, Docker 로그 → Loki) |
+| Prometheus | `9090` | 메트릭 저장소 (`/graph` UI 포함) |
 
 
 ---
@@ -955,7 +961,7 @@ LOKI_LABELS=app=llm-proxy,env=production
 }
 ```
 
-`docker compose up` 시 Grafana(`http://localhost:3000`)에서 Loki 데이터소스를 추가해 바로 조회할 수 있습니다.
+`docker compose up` 시 Grafana(`http://localhost:3000`)에서 Prometheus와 Loki 데이터소스가 자동으로 등록되어 별도 설정 없이 바로 조회할 수 있습니다. Grafana Alloy가 `proxy:8080/metrics`를 수집해 Prometheus로 remote_write하며, Docker 컨테이너 로그는 Loki로 전달됩니다.
 
 ---
 
