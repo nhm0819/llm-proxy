@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# No scrape_configs needed — Alloy pushes metrics via remote_write.
+# Prometheus is started with --web.enable-remote-write-receiver to accept
+# incoming remote_write requests from Alloy.
