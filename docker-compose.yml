@@ -14,8 +14,8 @@ services:
       # Example: PROXY_API_KEYS_JSON: '{"sk-proxy-dev":"dev-user"}'
       PROXY_API_KEYS_JSON: ""    # empty = no auth (dev mode)
 
-      # PostgreSQL (dev default; override via .env or environment)
-      DATABASE_URL: "${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/llm_proxy?sslmode=disable}"
+      # PostgreSQL
+      DATABASE_URL: "${DATABASE_URL}"
 
       # Redis
       REDIS_ADDR: "redis:6379"
@@ -52,7 +52,7 @@ services:
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-llm_proxy}"
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
     ports:
       - "5432:5432"
     volumes:
@@ -87,7 +87,7 @@ services:
   prometheus:
     image: prom/prometheus:latest
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./config/prometheus:/etc/prometheus
       - prometheus_data:/prometheus
@@ -100,7 +100,7 @@ services:
   alloy:
     image: grafana/alloy:latest
     ports:
-      - "12345:12345"
+      - "127.0.0.1:12345:12345"
     volumes:
       - ./config/alloy:/etc/alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -118,7 +118,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_ADMIN_PASSWORD}"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning
