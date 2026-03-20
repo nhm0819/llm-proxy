@@ -25,7 +25,7 @@ go test -race ./...
 # Docker 이미지
 docker build -t llm-proxy:latest .
 
-# 로컬 전체 스택 (proxy + Redis + Loki + Grafana)
+# 로컬 전체 스택 (proxy + PostgreSQL + Redis + Loki + Grafana + Alloy + Prometheus)
 docker compose up -d
 ```
 
@@ -76,6 +76,15 @@ pkg/
              httputil_test.go  CopyHeaders·RespondErr·NewRequestID 유닛테스트
 scripts/
   llm_review.py               GitLab CI LLM 코드 리뷰 스크립트 (vLLM 호출 → MR 코멘트)
+config/
+  alloy/
+    config.alloy              Grafana Alloy River 설정 (prometheus.scrape → remote_write, Docker 로그 → Loki)
+  prometheus/
+    prometheus.yml            Prometheus 최소 설정 (scrape_interval 15s, remote_write_receiver 활성)
+  grafana/
+    provisioning/
+      datasources/
+        datasources.yml       Grafana datasource 자동 provisioning (Prometheus + Loki)
 ```
 
 ---
@@ -312,3 +321,5 @@ MR 오픈 시 `scripts/llm_review.py`가 실행되어 vLLM에 diff를 보내고 
 | Redis | `6379` | — |
 | Loki | `3100` | — |
 | Grafana | `3000` | admin/admin |
+| Grafana Alloy | `12345` | `/metrics` (Alloy 자체 메트릭) |
+| Prometheus | `9090` | `/graph`, `/metrics` |

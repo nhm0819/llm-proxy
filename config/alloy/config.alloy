@@ -1,0 +1,56 @@
+// Grafana Alloy configuration for llm-proxy observability stack.
+// Scrapes Prometheus metrics from the proxy and forwards them to Prometheus.
+// Collects Docker container logs and ships them to Loki.
+
+// ---------------------------------------------------------------------------
+// Prometheus: scrape proxy /metrics and remote_write to Prometheus
+// ---------------------------------------------------------------------------
+
+prometheus.scrape "proxy" {
+  targets = [{
+    __address__ = "proxy:8080",
+  }]
+  metrics_path = "/metrics"
+  scrape_interval = "15s"
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = "http://prometheus:9090/api/v1/write"
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Loki: collect Docker container logs and push to Loki
+// ---------------------------------------------------------------------------
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "docker_logs" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "default" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.docker_logs.output
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
