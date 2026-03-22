@@ -226,12 +226,12 @@ curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
 | `apikey` (handler) | Admin REST API CRUD + 인증 + disabled + method not allowed (12개, Docker skip) |
 | `audit` | miniredis + redis 클라이언트(`rdb.XRange`, `rdb.HGetAll`)로 검증 — miniredis 직접 메서드 사용 금지 |
 | `quota`, `ratelimit` | miniredis + redis 클라이언트; concurrent Reserve·독립 키·TTL 만료·limit=1 엣지 케이스 포함 |
-| `proxy` (통합) | `httptest.Server` fake upstream + miniredis; `StaticKeyRegistry` 사용 |
+| `proxy` (통합) | `httptest.Server` fake upstream + miniredis; `StaticKeyRegistry` 사용; 멀티모달 케이스 포함 |
 | `breaker`, `pii`, `router` | 순수 단위 테스트; per-host 독립 circuit·probe fail reopens·State String 포함 |
 | `config` | Load() 기본값, 환경변수 오버라이드, ROUTES_JSON 파싱 (7개) |
 | `middleware` | RequestID, Recover, MaxBody, Chain, AccessLog (9개) |
 | `httputil` | CopyHeaders, RespondErr, NewRequestID (7개) |
-| `tokencount` | Count 함수, 캐시, fallback (6개) |
+| `tokencount` | Count 함수, 캐시, fallback, EstimateImageTokens (11개) |
 | `loki` | Push no-op, httptest mock, 라벨 머지, 에러 처리 (5개) |
 | `metrics` | custom registry로 메트릭 등록/기록 검증 (7개) |
 | `docs` | spec/UI 엔드포인트, Cache-Control 헤더 (3개) |
@@ -307,6 +307,7 @@ MR 오픈 시 `scripts/llm_review.py`가 실행되어 vLLM에 diff를 보내고 
 | `QUOTA_TIMEZONE` | `Asia/Seoul` | 일일 리셋 기준 시간대 |
 | `AUDIT_HMAC_KEY` | — | 감사 해시 HMAC 키 (미설정=SHA-256) |
 | `LOKI_PUSH_URL` | — | Loki 엔드포인트 (미설정=비활성) |
+| `MAX_BODY_BYTES` | `20971520` (20MB) | 요청 본문 최대 크기 (바이트). 이미지 포함 멀티모달 요청 시 증가 필요 |
 
 전체 목록: [ENV.md](./ENV.md) | 로컬 개발용 템플릿: [.env.example](../.env.example)
 

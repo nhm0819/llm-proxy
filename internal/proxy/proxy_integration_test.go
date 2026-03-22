@@ -74,6 +74,7 @@ func testProxy(t *testing.T, upstream *httptest.Server, cfg config.Config) *prox
 
 func defaultCfg() config.Config {
 	return config.Config{
+		MaxBodyBytes:                    config.DefaultMaxBodyBytes,
 		DailyTokenLimit:                 100_000,
 		TokenSafetyFactor:               1.2,
 		DefaultMaxCompletionTokensChat:  512,

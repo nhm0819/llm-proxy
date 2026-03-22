@@ -72,6 +72,19 @@ paths:
                   messages:
                     - role: user
                       content: "Hello!"
+              multimodal:
+                summary: 멀티모달 (Vision) 요청
+                value:
+                  model: gpt-4o
+                  messages:
+                    - role: user
+                      content:
+                        - type: text
+                          text: "What is in this image?"
+                        - type: image_url
+                          image_url:
+                            url: "https://example.com/image.png"
+                            detail: auto
               streaming:
                 summary: 스트리밍 요청
                 value:
@@ -323,7 +336,36 @@ components:
           type: string
           enum: [system, user, assistant, tool]
         content:
+          description: 텍스트 문자열 또는 멀티모달 content parts 배열
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: "#/components/schemas/ContentPart"
+
+    ContentPart:
+      type: object
+      required: [type]
+      properties:
+        type:
           type: string
+          enum: [text, image_url]
+        text:
+          type: string
+          description: type이 text일 때 텍스트 내용
+        image_url:
+          type: object
+          description: type이 image_url일 때 이미지 정보
+          properties:
+            url:
+              type: string
+              description: 이미지 URL 또는 base64 data URI
+              example: "https://example.com/image.png"
+            detail:
+              type: string
+              enum: [low, high, auto]
+              default: auto
+              description: 이미지 해상도 수준
 
     ChatCompletionResponse:
       type: object

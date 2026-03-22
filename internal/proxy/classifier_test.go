@@ -169,6 +169,207 @@ func TestExtractTotalTokens_Missing(t *testing.T) {
 	}
 }
 
+// ── CountImageTokens ─────────────────────────────────────────────────────────
+
+func TestCountImageTokens_LowDetail(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": "https://example.com/img.png", "detail": "low"},
+				},
+			},
+		},
+	}
+	got := proxy.CountImageTokens(msgs)
+	if got != 85 {
+		t.Errorf("expected 85 for low detail, got %d", got)
+	}
+}
+
+func TestCountImageTokens_HighDetail(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": "https://example.com/img.png", "detail": "high"},
+				},
+			},
+		},
+	}
+	got := proxy.CountImageTokens(msgs)
+	if got != 765 {
+		t.Errorf("expected 765 for high detail, got %d", got)
+	}
+}
+
+func TestCountImageTokens_AutoDetail(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": "https://example.com/img.png", "detail": "auto"},
+				},
+			},
+		},
+	}
+	got := proxy.CountImageTokens(msgs)
+	if got != 765 {
+		t.Errorf("expected 765 for auto detail, got %d", got)
+	}
+}
+
+func TestCountImageTokens_NoDetailField(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": "https://example.com/img.png"},
+				},
+			},
+		},
+	}
+	got := proxy.CountImageTokens(msgs)
+	if got != 765 {
+		t.Errorf("expected 765 for missing detail (defaults to auto), got %d", got)
+	}
+}
+
+func TestCountImageTokens_MultipleImages(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": "describe these"},
+				map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": "https://example.com/1.png", "detail": "low"},
+				},
+				map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": "https://example.com/2.png", "detail": "high"},
+				},
+			},
+		},
+	}
+	got := proxy.CountImageTokens(msgs)
+	want := 85 + 765
+	if got != want {
+		t.Errorf("expected %d for mixed detail images, got %d", want, got)
+	}
+}
+
+func TestCountImageTokens_NoImages(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role":    "user",
+			"content": "just a text message",
+		},
+	}
+	got := proxy.CountImageTokens(msgs)
+	if got != 0 {
+		t.Errorf("expected 0 for text-only messages, got %d", got)
+	}
+}
+
+func TestCountImageTokens_NilMessages(t *testing.T) {
+	got := proxy.CountImageTokens(nil)
+	if got != 0 {
+		t.Errorf("expected 0 for nil messages, got %d", got)
+	}
+}
+
+// ── CollectRequestText with image_url ────────────────────────────────────────
+
+func TestCollectRequestText_ChatWithImageURL(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "describe this"},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "https://example.com/photo.jpg"},
+					},
+				},
+			},
+		},
+	}
+	text := proxy.CollectRequestText(proxy.KindChat, body)
+	if !contains(text, "describe this") {
+		t.Errorf("text part not extracted: %q", text)
+	}
+	if !contains(text, "https://example.com/photo.jpg") {
+		t.Errorf("image_url not extracted for PII scanning: %q", text)
+	}
+}
+
+// ── CollectRequestText data: URI filtering ───────────────────────────────────
+
+func TestCollectRequestText_ChatDataURIExcluded(t *testing.T) {
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "describe this"},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "data:image/png;base64,iVBORw0KGgoAAAANS"},
+					},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "https://example.com/photo.jpg"},
+					},
+				},
+			},
+		},
+	}
+	text := proxy.CollectRequestText(proxy.KindChat, body)
+	if !contains(text, "describe this") {
+		t.Errorf("text part not extracted: %q", text)
+	}
+	if contains(text, "data:image/png") {
+		t.Errorf("data: URI should be excluded from PII scanning, got: %q", text)
+	}
+	if !contains(text, "https://example.com/photo.jpg") {
+		t.Errorf("regular URL should still be included: %q", text)
+	}
+}
+
+// ── CountImageTokens cap ────────────────────────────────────────────────────
+
+func TestCountImageTokens_ExceedsMaxImages(t *testing.T) {
+	// Build 25 image parts, only 20 should be counted.
+	var parts []any
+	for i := 0; i < 25; i++ {
+		parts = append(parts, map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": "https://example.com/img.png", "detail": "low"},
+		})
+	}
+	msgs := []any{
+		map[string]any{
+			"role":    "user",
+			"content": parts,
+		},
+	}
+	got := proxy.CountImageTokens(msgs)
+	want := 85 * 20 // 20 low-detail images
+	if got != want {
+		t.Errorf("expected %d (20 images capped), got %d", want, got)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func contains(s, sub string) bool {

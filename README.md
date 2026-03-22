@@ -719,6 +719,7 @@ PROXY_API_KEYS_JSON='{"sk-proxy-alice":"alice","sk-proxy-bob":"bob"}'
 | `QUOTA_TIMEZONE` | `Asia/Seoul` | 일일 할당량 리셋 기준 시간대 |
 | `AUDIT_HMAC_KEY` | _(없음)_ | 감사 해시 HMAC 키 (미설정 시 SHA-256) |
 | `LOKI_PUSH_URL` | _(없음)_ | Loki 엔드포인트 (미설정 시 비활성) |
+| `MAX_BODY_BYTES` | `20971520` (20MB) | 요청 본문 최대 크기 (바이트). 이미지 포함 멀티모달 요청 시 증가 필요 |
 
 ---
 
@@ -1045,7 +1046,7 @@ go tool cover -html=coverage.out
 | `config` | Load() 기본값, 환경변수 오버라이드, ROUTES_JSON 파싱 (7개) |
 | `pii` | 이메일·전화·RRN 체크섬, 빈 입력, 플레이스홀더 형식 |
 | `router` | 최장 접두사 우선, 빈 모델 fallback |
-| `tokencount` | Count 함수, 캐시 히트, fallback (6개) |
+| `tokencount` | Count 함수, 캐시 히트, fallback, EstimateImageTokens (11개) |
 | `quota` | Lua 스크립트 원자성, DayKey 형식, TTL, 음수 clamp, concurrent Reserve (4개 추가) |
 | `ratelimit` | RPS 제한, 사용자 독립성, TTL 만료 후 리셋, limit=1 엣지 케이스 (2개 추가) |
 | `audit` | Stream 기록, HMAC vs SHA-256, TTL 검증 |
@@ -1058,7 +1059,7 @@ go tool cover -html=coverage.out
 | `apikey` (handler) | Admin REST API CRUD + 인증 + disabled + method not allowed (12개, Docker skip) |
 | `proxy/classify` | 경로 분류, 메시지 텍스트 추출, 토큰 파라미터 파싱 |
 | `proxy/stream` | SSE 이벤트 파싱, 엑서프트 트런케이션 |
-| `proxy` (통합) | E2E: 성공·429·PII 차단·스트리밍·동시성 20개 고루틴 |
+| `proxy` (통합) | E2E: 성공·429·PII 차단·스트리밍·동시성 20개 고루틴·멀티모달 케이스 |
 
 ### 빌드
 

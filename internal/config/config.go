@@ -11,7 +11,7 @@ import (
 
 const (
 	DefaultListenAddr         = ":8080"
-	DefaultMaxBodyBytes       = 5 << 20
+	DefaultMaxBodyBytes       = 20 << 20
 	DefaultMaxLoggedTextBytes = 4 << 10
 	DefaultUpstreamTimeoutSec = 300
 )
@@ -70,6 +70,7 @@ type Config struct {
 	AdminAPIKey string // Bearer token for /admin/* endpoints; empty = disabled
 
 	// Proxy behaviour
+	MaxBodyBytes    int64
 	UpstreamTimeout time.Duration
 
 	// Inject include_usage for OpenAI chat streaming
@@ -109,6 +110,7 @@ func Load() Config {
 
 		AdminAPIKey: os.Getenv("ADMIN_API_KEY"),
 
+		MaxBodyBytes:    int64(envInt(DefaultMaxBodyBytes, "MAX_BODY_BYTES")),
 		UpstreamTimeout: time.Duration(envInt(DefaultUpstreamTimeoutSec, "UPSTREAM_TIMEOUT_SECONDS")) * time.Second,
 
 		InjectChatStreamUsage:       envBool(false, "INJECT_CHAT_STREAM_USAGE"),

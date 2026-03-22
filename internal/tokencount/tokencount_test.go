@@ -48,6 +48,38 @@ func TestCount_CJKText(t *testing.T) {
 	}
 }
 
+// ── EstimateImageTokens ──────────────────────────────────────────────────────
+
+func TestEstimateImageTokens_Low(t *testing.T) {
+	if got := tokencount.EstimateImageTokens("low"); got != 85 {
+		t.Errorf("expected 85 for low, got %d", got)
+	}
+}
+
+func TestEstimateImageTokens_High(t *testing.T) {
+	if got := tokencount.EstimateImageTokens("high"); got != 765 {
+		t.Errorf("expected 765 for high, got %d", got)
+	}
+}
+
+func TestEstimateImageTokens_Auto(t *testing.T) {
+	if got := tokencount.EstimateImageTokens("auto"); got != 765 {
+		t.Errorf("expected 765 for auto, got %d", got)
+	}
+}
+
+func TestEstimateImageTokens_Empty(t *testing.T) {
+	if got := tokencount.EstimateImageTokens(""); got != 765 {
+		t.Errorf("expected 765 for empty string, got %d", got)
+	}
+}
+
+func TestEstimateImageTokens_Unknown(t *testing.T) {
+	if got := tokencount.EstimateImageTokens("medium"); got != 765 {
+		t.Errorf("expected 765 for unknown value, got %d", got)
+	}
+}
+
 func TestCount_LongText(t *testing.T) {
 	tc := tokencount.New()
 	var sb strings.Builder

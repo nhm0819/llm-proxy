@@ -99,7 +99,7 @@ func main() {
 		middleware.Recover,
 		middleware.RequestID,
 		middleware.AccessLog,
-		middleware.MaxBody(config.DefaultMaxBodyBytes),
+		middleware.MaxBody(cfg.MaxBodyBytes),
 	))
 
 	// Health + metrics (unauthenticated)

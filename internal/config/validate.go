@@ -34,6 +34,12 @@ func (c Config) Validate() error {
 			return fmt.Errorf("route[%d] has empty name", i)
 		}
 	}
+	if c.MaxBodyBytes <= 0 {
+		return fmt.Errorf("MAX_BODY_BYTES must be > 0, got %d", c.MaxBodyBytes)
+	}
+	if c.MaxBodyBytes > 100<<20 {
+		return fmt.Errorf("MAX_BODY_BYTES must be <= 100MB, got %d", c.MaxBodyBytes)
+	}
 	if c.AuditRecordTTLSeconds <= 0 {
 		return fmt.Errorf("AUDIT_RECORD_TTL_SECONDS must be > 0")
 	}

@@ -138,6 +138,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if IsGenerative(kind) && model != "" && bodyJSON != nil {
 		promptEst = h.deps.TokenCount.Count(model, reqText)
+		if msgs, ok := bodyJSON["messages"].([]any); ok {
+			promptEst += CountImageTokens(msgs)
+		}
 		maxOut := ExtractMaxOutputTokens(kind, bodyJSON, h.cfg)
 		reserve = int(math.Ceil(float64(promptEst)*h.cfg.TokenSafetyFactor)) + maxOut
 
@@ -302,7 +305,7 @@ func (h *Handler) handleNonStream(
 	promptEst, reserve, usedAfterReserve, tokenLimit,
 	rpsLimit, rpsCount int, qDayKey string, ttlSec int,
 ) {
-	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, config.DefaultMaxBodyBytes))
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, h.cfg.MaxBodyBytes))
 
 	var respJSON map[string]any
 	if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
@@ -365,7 +368,7 @@ func (h *Handler) readBody(r *http.Request) ([]byte, map[string]any, error) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
 		return nil, nil, nil
 	}
-	b, err := io.ReadAll(io.LimitReader(r.Body, config.DefaultMaxBodyBytes))
+	b, err := io.ReadAll(io.LimitReader(r.Body, h.cfg.MaxBodyBytes))
 	r.Body.Close()
 	if err != nil {
 		return nil, nil, err
