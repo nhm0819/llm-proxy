@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/nhm0819/llm-proxy/internal/config"
+	"github.com/nhm0819/llm-proxy/internal/tokencount"
 )
 
 // Kind classifies the API endpoint type.
@@ -197,6 +198,13 @@ func extractChatMessages(body map[string]any) []string {
 						parts = append(parts, t)
 					}
 				}
+				if getString(pm, "type") == "image_url" {
+					if iu, ok := pm["image_url"].(map[string]any); ok {
+						if u := getString(iu, "url"); u != "" && !strings.HasPrefix(u, "data:") {
+							parts = append(parts, u)
+						}
+					}
+				}
 			}
 		}
 	}
@@ -308,6 +316,49 @@ func extractCompletionChoices(body map[string]any) []string {
 		}
 	}
 	return parts
+}
+
+// maxImagesPerRequest is the maximum number of images counted for token
+// estimation. Images beyond this limit are ignored to prevent abuse.
+const maxImagesPerRequest = 20
+
+// CountImageTokens estimates the total token cost for all image_url parts in
+// the messages array. It delegates per-image estimation to
+// tokencount.EstimateImageTokens. At most maxImagesPerRequest images are counted.
+func CountImageTokens(messages []any) int {
+	total := 0
+	count := 0
+	for _, mv := range messages {
+		mm, _ := mv.(map[string]any)
+		if mm == nil {
+			continue
+		}
+		parts, ok := mm["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, pv := range parts {
+			pm, _ := pv.(map[string]any)
+			if pm == nil {
+				continue
+			}
+			if getString(pm, "type") != "image_url" {
+				continue
+			}
+			count++
+			if count > maxImagesPerRequest {
+				return total
+			}
+			detail := "auto"
+			if iu, ok := pm["image_url"].(map[string]any); ok {
+				if d := getString(iu, "detail"); d != "" {
+					detail = d
+				}
+			}
+			total += tokencount.EstimateImageTokens(detail)
+		}
+	}
+	return total
 }
 
 // ---------- JSON field helpers ----------

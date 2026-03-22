@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -103,6 +104,29 @@ func TestMaxBody_ZeroContentLength_Passes(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 for zero content length, got %d", rec.Code)
+	}
+}
+
+func TestMaxBody_ChunkedBodyExceedsLimit(t *testing.T) {
+	// Simulate chunked transfer (ContentLength = -1) with body exceeding limit.
+	bigBody := strings.Repeat("x", 100)
+	handler := middleware.MaxBody(10)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reading the body should fail because MaxBytesReader wraps it.
+		_, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("POST", "/test", strings.NewReader(bigBody))
+	req.ContentLength = -1 // simulate chunked / unknown length
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for chunked body exceeding limit, got %d", rec.Code)
 	}
 }
 

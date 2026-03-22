@@ -42,6 +42,18 @@ func (tc *TiktokenCounter) Count(model, text string) int {
 	return len(enc.Encode(text, nil, nil))
 }
 
+// EstimateImageTokens returns a conservative token estimate for a single image
+// based on the detail level.  Values align with OpenAI's vision pricing:
+//   - "low"  → 85 tokens (fixed-size thumbnail)
+//   - "high" → 765 tokens (multiple tiles)
+//   - other  → 765 tokens (conservative default for "auto" or unspecified)
+func EstimateImageTokens(detail string) int {
+	if detail == "low" {
+		return 85
+	}
+	return 765
+}
+
 func (tc *TiktokenCounter) encodingFor(model string) *tiktoken.Tiktoken {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
