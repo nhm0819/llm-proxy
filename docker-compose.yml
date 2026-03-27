@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ---------------------------------------------------------------------------
   # nginx – public entry point (port 80 → llm-proxy:8080)
@@ -40,7 +38,7 @@ services:
       - "--port"
       - "8000"
       - "--max-model-len"
-      - "${VLLM_MAX_MODEL_LEN:-8192}"
+      - "${VLLM_MAX_MODEL_LEN:-131072}"
       - "--trust-remote-code"
     # GPU 리소스 예약 (NVIDIA Container Toolkit 필요)
     deploy:
@@ -64,10 +62,23 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Routing – vLLM을 기본 업스트림으로 사용
-      # OpenAI로 전환: UPSTREAM_BASE_URL=https://api.openai.com + OPENAI_API_KEY 설정
+      # Routing
+      # ROUTES_JSON 설정 시 UPSTREAM_BASE_URL은 무시됨 (config.go:134)
+      # prefix: 요청 body의 "model" 필드 앞부분과 매칭 (가장 긴 prefix 우선)
+      # prefix: "" → default route (매칭 실패 시 fallback, Routes[0]이 DefaultRoute)
+      ROUTES_JSON: >-
+        [
+          {"prefix":"Qwen","name":"vllm","base_url":"http://vllm:8000","api_key":""}
+        ]
+      # 멀티 업스트림 예시 (OpenAI 추가 시 아래로 교체):
+      # ROUTES_JSON: >-
+      #   [
+      #     {"prefix":"Qwen",  "name":"vllm",   "base_url":"http://vllm:8000",       "api_key":""},
+      #     {"prefix":"gpt",   "name":"openai", "base_url":"https://api.openai.com", "api_key":"${OPENAI_API_KEY}"},
+      #     {"prefix":"",      "name":"vllm",   "base_url":"http://vllm:8000",       "api_key":""}
+      #   ]
       UPSTREAM_BASE_URL: "${UPSTREAM_BASE_URL:-http://vllm:8000}"
-      UPSTREAM_API_KEY: "${UPSTREAM_API_KEY:-${OPENAI_API_KEY:-}}"
+      UPSTREAM_API_KEY: "${UPSTREAM_API_KEY:-}"
 
       # Auth – map proxy keys to user IDs
       # Example: PROXY_API_KEYS_JSON: '{"sk-proxy-dev":"dev-user"}'
@@ -127,6 +138,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    ports:
+      - "6379:6379"
     command: redis-server --save 60 1 --loglevel warning
     volumes:
       - redis_data:/data
