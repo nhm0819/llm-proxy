@@ -18,8 +18,7 @@
   "go.useLanguageServer": true,
   "gopls": {
     "ui.semanticTokens": true,
-    "ui.documentation.linksInHover": true,
-    "build.buildFlags": ["-race"]
+    "ui.documentation.linksInHover": true
   },
 
   // ── 에디터 ───────────────────────────────────────────────
