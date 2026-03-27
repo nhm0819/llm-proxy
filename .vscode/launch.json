@@ -1,7 +1,6 @@
 {
   "version": "0.2.0",
   "configurations": [
-
     // ──────────────────────────────────────────────────────────
     // 프록시 서버 실행 / 디버그
     // ──────────────────────────────────────────────────────────
@@ -11,7 +10,7 @@
       "request": "launch",
       "mode": "debug",
       "program": "${workspaceFolder}/cmd/proxy",
-      "envFile": "${workspaceFolder}/.env",
+      "envFile": "${workspaceFolder}/.env.local",
       "env": {
         "REDIS_ADDR": "localhost:6379"
       },
@@ -24,7 +23,7 @@
       "request": "launch",
       "mode": "debug",
       "program": "${workspaceFolder}/cmd/proxy",
-      "envFile": "${workspaceFolder}/.env",
+      "envFile": "${workspaceFolder}/.env.local",
       "env": {
         "REDIS_ADDR": "localhost:6379",
         "UPSTREAM_BASE_URL": "http://localhost:9999",
@@ -37,7 +36,6 @@
       },
       "showLog": true
     },
-
     // ──────────────────────────────────────────────────────────
     // 전체 테스트
     // ──────────────────────────────────────────────────────────
@@ -47,7 +45,12 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/...",
-      "args": ["-v", "-count=1", "-race", "-timeout=120s"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race",
+        "-timeout=120s"
+      ],
       "showLog": true
     },
     {
@@ -57,7 +60,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${fileDirname}",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -68,12 +75,14 @@
       "mode": "test",
       "program": "${fileDirname}",
       "args": [
-        "-v", "-count=1", "-race",
-        "-run", "${input:testFuncName}"
+        "-v",
+        "-count=1",
+        "-race",
+        "-run",
+        "${input:testFuncName}"
       ],
       "showLog": true
     },
-
     // ──────────────────────────────────────────────────────────
     // 패키지별 테스트
     // ──────────────────────────────────────────────────────────
@@ -83,7 +92,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/apikey",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -92,7 +105,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/audit",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -101,7 +118,12 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/proxy",
-      "args": ["-v", "-count=1", "-race", "-timeout=60s"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race",
+        "-timeout=60s"
+      ],
       "showLog": true
     },
     {
@@ -110,7 +132,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/quota",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -119,7 +145,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/ratelimit",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -128,7 +158,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/middleware",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -137,7 +171,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/router",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -146,7 +184,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/pii",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -155,7 +197,11 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/breaker",
-      "args": ["-v", "-count=1", "-race"],
+      "args": [
+        "-v",
+        "-count=1",
+        "-race"
+      ],
       "showLog": true
     },
     {
@@ -164,11 +210,13 @@
       "request": "launch",
       "mode": "test",
       "program": "${workspaceFolder}/internal/config",
-      "args": ["-v", "-count=1"],
+      "args": [
+        "-v",
+        "-count=1"
+      ],
       "showLog": true
     }
   ],
-
   // ──────────────────────────────────────────────────────────
   // 복합 구성
   // ──────────────────────────────────────────────────────────
@@ -176,11 +224,13 @@
     {
       // 전체 테스트 후 서버 실행 (순차 실행은 지원하지 않으므로 병렬 시작됨)
       "name": "Test All + Run Proxy",
-      "configurations": ["Test: All packages (-race)", "Proxy: Run (dry — no upstream key)"],
+      "configurations": [
+        "Test: All packages (-race)",
+        "Proxy: Run (dry — no upstream key)"
+      ],
       "stopAll": true
     }
   ],
-
   // ──────────────────────────────────────────────────────────
   // 입력 변수
   // ──────────────────────────────────────────────────────────
