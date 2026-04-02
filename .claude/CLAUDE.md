@@ -13,7 +13,7 @@ go mod tidy
 # 빌드
 go build ./...
 
-# 전체 테스트 (miniredis 사용 — 실제 Redis 불필요)
+# 전체 테스트 (SQLite in-memory 사용으로 Docker 없이도 apikey 테스트 가능)
 go test ./...
 
 # 레이스 컨디션 검사 (PR 전 필수)
@@ -35,9 +35,12 @@ Go 실행 파일 경로: `/c/Program\ Files/Go/bin/go` (Windows PATH에 없는 �
 ```
 cmd/proxy/main.go              진입점, 의존성 조립 (DI root)
 internal/
-  apikey/    store.go          Redis 기반 API 키 CRUD + Resolve
+  apikey/    db.go             SQLDB 인터페이스 (database/sql adapter)
+             store.go          PG primary + Redis cache 기반 API 키 CRUD + Resolve
              handler.go        Admin HTTP 핸들러 (/admin/keys)
-             store_test.go     apikey 단위 테스트
+             migrate.go        go:embed + RunMigrations (시작 시 자동 실행, PostgreSQL/SQLite DDL 분기)
+             store_test.go     apikey 테스트 (SQLite in-memory + miniredis)
+             handler_test.go   Admin REST API CRUD + 인증 테스트
   config/    config.go         환경변수 로딩
              validate.go       시작 시 검증
   docs/      handler.go        Swagger UI + OpenAPI spec 서빙 (/docs/)
@@ -175,7 +178,7 @@ curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
 
 | 패키지 | 테스트 방식 |
 |--------|------------|
-| `apikey` | miniredis + redis 클라이언트; `mr.FastForward`로 TTL 만료 시뮬레이션 |
+| `apikey` | SQLite in-memory + miniredis; Docker 불필요 |
 | `audit` | miniredis + redis 클라이언트(`rdb.XRange`, `rdb.HGetAll`)로 검증 — miniredis 직접 메서드 사용 금지 |
 | `quota`, `ratelimit` | miniredis + redis 클라이언트 |
 | `proxy` (통합) | `httptest.Server` fake upstream + miniredis; `StaticKeyRegistry` 사용 |
