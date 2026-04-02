@@ -266,9 +266,6 @@ func TestHandler_Auth_InvalidToken(t *testing.T) {
 }
 
 func TestHandler_Auth_Disabled(t *testing.T) {
-	if !dockerAvailable() {
-		t.Skip("skipping: Docker is not available")
-	}
 	store := setupTestStore(t)
 	handler := apikey.NewHandler(store, "") // empty admin key = disabled
 	mux := http.NewServeMux()

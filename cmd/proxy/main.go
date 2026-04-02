@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/nhm0819/llm-proxy/internal/apikey"
@@ -36,19 +38,19 @@ func main() {
 	}
 
 	rdb := mustRedis(cfg)
-	pool := mustPostgres(cfg)
-	defer pool.Close()
+	db := mustPostgres(cfg)
+	defer db.Close()
 
 	// ── Run database migrations ─────────────────────────────────────────
 	migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer migrateCancel()
-	if err := apikey.RunMigrations(migrateCtx, pool); err != nil {
+	if err := apikey.RunMigrations(migrateCtx, db, apikey.DialectPostgres); err != nil {
 		log.Fatalf("database migration failed: %v", err)
 	}
 	log.Println("database migrations applied")
 
 	// ── API key store (PG primary + Redis cache) ────────────────────────
-	keyStore := apikey.New(pool, rdb)
+	keyStore := apikey.New(db, rdb, apikey.DialectPostgres)
 
 	// Seed static keys from PROXY_API_KEYS_JSON into PostgreSQL (idempotent).
 	staticKeys := middleware.LoadStaticKeyRegistry()
@@ -161,22 +163,25 @@ func mustRedis(cfg config.Config) *redis.Client {
 	return rdb
 }
 
-func mustPostgres(cfg config.Config) *pgxpool.Pool {
+func mustPostgres(cfg config.Config) *sql.DB {
 	if cfg.DatabaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
+	db, err := sql.Open("pgx", cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("postgres open failed: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Fatalf("postgres pool creation failed: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		log.Fatalf("postgres ping failed: %v", err)
 	}
-	cc := pool.Config().ConnConfig
-	log.Printf("postgres connected: %s:%d/%s", cc.Host, cc.Port, cc.Database)
-	return pool
+	if u, err := url.Parse(cfg.DatabaseURL); err == nil {
+		log.Printf("postgres connected: host=%s db=%s", u.Host, u.Path)
+	} else {
+		log.Printf("postgres connected")
+	}
+	return db
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

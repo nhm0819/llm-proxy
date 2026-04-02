@@ -2,118 +2,33 @@ package apikey_test
 
 import (
 	"context"
-	"fmt"
-	"os/exec"
-	"runtime"
+	"database/sql"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
+	_ "modernc.org/sqlite"
 
 	"github.com/nhm0819/llm-proxy/internal/apikey"
 )
 
-// dockerAvailable returns true if Docker daemon is reachable.
-func dockerAvailable() bool {
-	cmd := "docker"
-	if runtime.GOOS == "windows" {
-		cmd = "docker.exe"
-	}
-	out, err := exec.Command(cmd, "info").CombinedOutput()
-	if err != nil {
-		return false
-	}
-	_ = out
-	return true
-}
-
-// startPostgresContainer starts a postgres testcontainer, recovering from
-// panics that testcontainers-go may raise on unsupported platforms.
-func startPostgresContainer(t *testing.T, ctx context.Context) (connStr string, cleanup func()) {
-	t.Helper()
-
-	type result struct {
-		connStr string
-		cleanup func()
-		err     error
-	}
-
-	ch := make(chan result, 1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				ch <- result{err: fmt.Errorf("panic: %v", r)}
-			}
-		}()
-		pgContainer, err := tcpostgres.Run(ctx,
-			"docker.io/library/postgres:17-alpine",
-			tcpostgres.WithDatabase("test_llm_proxy"),
-			tcpostgres.WithUsername("test"),
-			tcpostgres.WithPassword("test"),
-			testcontainers.WithWaitStrategy(
-				wait.ForLog("database system is ready to accept connections").
-					WithOccurrence(2).
-					WithStartupTimeout(30*time.Second),
-			),
-		)
-		if err != nil {
-			ch <- result{err: err}
-			return
-		}
-		cs, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
-		if err != nil {
-			_ = pgContainer.Terminate(ctx)
-			ch <- result{err: err}
-			return
-		}
-		ch <- result{
-			connStr: cs,
-			cleanup: func() { _ = pgContainer.Terminate(ctx) },
-		}
-	}()
-
-	res := <-ch
-	if res.err != nil {
-		t.Skipf("skipping: cannot start postgres container: %v", res.err)
-	}
-	return res.connStr, res.cleanup
-}
-
-// setupTestStore creates a real PostgreSQL container + miniredis and returns a
-// configured Store.  Tests that cannot connect to Docker are skipped.
+// setupTestStore creates an in-memory SQLite database and returns a configured
+// Store. No Docker or external services are required.
 func setupTestStore(t *testing.T) *apikey.Store {
 	t.Helper()
 
-	if !dockerAvailable() {
-		t.Skip("skipping: Docker is not available")
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open sqlite: %v", err)
 	}
+	t.Cleanup(func() { db.Close() })
 
 	ctx := context.Background()
-
-	connStr, pgCleanup := startPostgresContainer(t, ctx)
-	t.Cleanup(pgCleanup)
-
-	pool, err := pgxpool.New(ctx, connStr)
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	// Run migrations.
-	if err := apikey.RunMigrations(ctx, pool); err != nil {
+	if err := apikey.RunMigrations(ctx, db, apikey.DialectSQLite); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}
 
-	// Miniredis for cache layer.
-	mr := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-
-	return apikey.New(pool, rdb)
+	// No Redis cache for unit tests (nil rdb).
+	return apikey.New(db, nil, apikey.DialectSQLite)
 }
 
 func TestCreate_And_Resolve(t *testing.T) {
@@ -279,16 +194,16 @@ func TestGet_CacheHit(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create populates cache.
+	// Create populates (no cache in test, but should succeed).
 	k, err := store.Create(ctx, "cached-user", "cache test", nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Second Get should hit cache (no way to distinguish, but should succeed).
+	// Second Get should succeed via DB fallback.
 	got, err := store.Get(ctx, k.Key)
 	if err != nil {
-		t.Fatalf("Get (cache hit): %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got.UserID != "cached-user" {
 		t.Errorf("expected cached-user, got %q", got.UserID)
@@ -301,18 +216,18 @@ func TestDelete_InvalidatesCache(t *testing.T) {
 
 	k, _ := store.Create(ctx, "to-delete", "will be deleted", nil)
 
-	// Verify key is accessible (and cached).
+	// Verify key is accessible.
 	_, err := store.Get(ctx, k.Key)
 	if err != nil {
 		t.Fatalf("Get before delete: %v", err)
 	}
 
-	// Delete should clear cache.
+	// Delete should remove from DB.
 	if err := store.Delete(ctx, k.Key); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	// Should be gone from both PG and cache.
+	// Should be gone.
 	_, err = store.Get(ctx, k.Key)
 	if err == nil {
 		t.Error("expected ErrNotFound after delete")
