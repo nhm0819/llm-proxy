@@ -13,11 +13,8 @@ go mod tidy
 # 빌드
 go build ./...
 
-# 전체 테스트 (apikey 패키지는 Docker 필요 — 없으면 자동 skip)
+# 전체 테스트 (SQLite in-memory 사용으로 Docker 없이도 apikey 테스트 가능)
 go test ./...
-
-# Docker 없는 환경: 통합 테스트 제외
-go test -short ./...
 
 # 레이스 컨디션 검사 (PR 전 필수)
 go test -race ./...
@@ -38,11 +35,12 @@ Go 실행 파일 경로: `/c/Program\ Files/Go/bin/go` (Windows PATH에 없는 �
 ```
 cmd/proxy/main.go              진입점, 의존성 조립 (DI root)
 internal/
-  apikey/    store.go          PG primary + Redis cache 기반 API 키 CRUD + Resolve
+  apikey/    db.go             SQLDB 인터페이스 (database/sql adapter)
+             store.go          PG primary + Redis cache 기반 API 키 CRUD + Resolve
              handler.go        Admin HTTP 핸들러 (/admin/keys)
-             migrate.go        go:embed + RunMigrations (시작 시 자동 실행)
-             store_test.go     apikey 통합 테스트 (testcontainers-go + miniredis)
-             handler_test.go   Admin REST API CRUD + 인증 테스트 (Docker skip)
+             migrate.go        go:embed + RunMigrations (시작 시 자동 실행, PostgreSQL/SQLite DDL 분기)
+             store_test.go     apikey 테스트 (SQLite in-memory + miniredis)
+             handler_test.go   Admin REST API CRUD + 인증 테스트
              migrations/
                001_create_api_keys.sql  api_keys 테이블 DDL
   config/    config.go         환경변수 로딩
@@ -222,8 +220,8 @@ curl -X DELETE http://localhost:8080/admin/keys/sk-proxy-xxx \
 
 | 패키지 | 테스트 방식 |
 |--------|------------|
-| `apikey` | testcontainers-go (실제 PostgreSQL 컨테이너) + miniredis; Docker 미실행 시 자동 skip (`-short` 플래그 또는 Docker 데몬 없을 때) |
-| `apikey` (handler) | Admin REST API CRUD + 인증 + disabled + method not allowed (12개, Docker skip) |
+| `apikey` | SQLite in-memory + miniredis; Docker 불필요 |
+| `apikey` (handler) | Admin REST API CRUD + 인증 + disabled + method not allowed (12개) |
 | `audit` | miniredis + redis 클라이언트(`rdb.XRange`, `rdb.HGetAll`)로 검증 — miniredis 직접 메서드 사용 금지 |
 | `quota`, `ratelimit` | miniredis + redis 클라이언트; concurrent Reserve·독립 키·TTL 만료·limit=1 엣지 케이스 포함 |
 | `proxy` (통합) | `httptest.Server` fake upstream + miniredis; `StaticKeyRegistry` 사용; 멀티모달 케이스 포함 |
